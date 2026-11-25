@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Saturna">
+  <rect width="512" height="512" rx="96" fill="#0B1445"/>
+  <circle cx="256" cy="256" r="86" fill="#0B1445" stroke="#FFFFFF" stroke-width="12"/>
+  <ellipse cx="256" cy="256" rx="196" ry="62" fill="none" stroke="#1FB6F5" stroke-width="16" transform="rotate(-24 256 256)" stroke-dasharray="310 620"/>
+  <ellipse cx="256" cy="256" rx="196" ry="62" fill="none" stroke="#F7254B" stroke-width="16" transform="rotate(-24 256 256)" stroke-dasharray="310 620" stroke-dashoffset="-310"/>
+  <text x="256" y="302" text-anchor="middle" font-family="Avenir Next,Segoe UI,sans-serif" font-size="170" font-weight="800" fill="#FFFFFF">S</text>
+</svg>

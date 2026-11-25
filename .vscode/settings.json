@@ -1,0 +1,12 @@
+{
+  "editor.formatOnSave": true,
+  "python.defaultInterpreterPath": "${workspaceFolder}/backend/.venv/Scripts/python.exe",
+  "python.analysis.extraPaths": ["./backend"],
+  "python.testing.pytestEnabled": true,
+  "python.testing.pytestArgs": ["backend/tests"],
+  "[python]": { "editor.defaultFormatter": "charliermarsh.ruff" },
+  "[typescript]": { "editor.defaultFormatter": "esbenp.prettier-vscode" },
+  "[typescriptreact]": { "editor.defaultFormatter": "esbenp.prettier-vscode" },
+  "tailwindCSS.experimental.classRegex": [["className=\"([^\"]*)\""]],
+  "python.terminal.useEnvFile": true
+}

@@ -1,0 +1,37 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    command: ["postgres", "-c", "listen_addresses=*"]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-saturna}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-saturna}
+      POSTGRES_DB: ${POSTGRES_DB:-saturna}
+    ports: ["${POSTGRES_BIND_IP:-0.0.0.0}:${POSTGRES_PORT:-5433}:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-saturna} -d ${POSTGRES_DB:-saturna}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: ./backend
+    restart: unless-stopped
+    env_file: [.env]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://${POSTGRES_USER:-saturna}:${POSTGRES_PASSWORD:-saturna}@db:5432/${POSTGRES_DB:-saturna}}
+    ports: ["8000:8000"]
+
+  web:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_URL: ${VITE_API_URL:-http://localhost:8000}
+        VITE_BASE_PATH: ${VITE_BASE_PATH:-/}
+    restart: unless-stopped
+    depends_on: [api]
+    ports: ["8080:80"]
+
+volumes:
+  pgdata:
