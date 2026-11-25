@@ -1,9 +1,8 @@
-from tests.conftest import make_tenant, new_package
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from app.db.session import SessionLocal
-from app.models import Payment, Package
-from app.core.timeutil import utcnow
+from app.models import Payment
+from tests.conftest import make_tenant, new_package
 
 
 def test_free_plan_package_limit(client, owner):

@@ -11,8 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from app.core.config import get_settings
 from app.core.deps import DB, CurrentTenant, CurrentUser
 from app.db.session import SessionLocal
-from app.models import Notification
-from app.models import ProcessedMessage
+from app.models import Notification, ProcessedMessage
 from app.modules.ai_agent import service as agent
 from app.modules.notifications import service, whatsapp
 from app.modules.packages import service as pkgs

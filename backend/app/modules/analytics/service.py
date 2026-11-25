@@ -38,7 +38,7 @@ def cierre_caja(db: Session, tenant: Tenant, fecha: str) -> dict:
     try:
         local_date = datetime.strptime(fecha, "%Y-%m-%d")
     except ValueError:
-        raise HTTPException(422, "La fecha debe tener formato YYYY-MM-DD")
+        raise HTTPException(422, "La fecha debe tener formato YYYY-MM-DD") from None
     start = local_date - BO_OFFSET
     end = start + timedelta(days=1)
     cobros = revenue_between(db, tenant.id, start, end)

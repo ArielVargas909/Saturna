@@ -11,8 +11,8 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.plans import plan_of
-from app.core.timeutil import to_local, today_start_utc, utcnow
 from app.core.text import title_name
+from app.core.timeutil import to_local, today_start_utc, utcnow
 from app.models import Package, Tenant
 from app.modules.analytics import service as analytics
 from app.modules.packages import service as pkgs

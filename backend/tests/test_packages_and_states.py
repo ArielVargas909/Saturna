@@ -1,5 +1,5 @@
-from app.modules.packages.service import can_transition
 from app.models import Package, User
+from app.modules.packages.service import can_transition
 from tests.conftest import make_tenant, new_package
 
 
