@@ -95,6 +95,12 @@ export default function PackageDetailPage() {
             <dt className="text-slate-500">Custodia hasta</dt>
             <dd className="font-medium">{dt(p.custody_deadline)}</dd>
           </div>
+          {p.scheduled_pickup_at && (
+            <div className="col-span-2 rounded-lg bg-cyan-50 px-3 py-2 text-brand-900">
+              <dt className="text-xs font-semibold text-cyan-700">Horario de retiro acordado</dt>
+              <dd className="font-semibold">{p.scheduled_pickup_at}</dd>
+            </div>
+          )}
         </dl>
         {open && (
           <div className="rounded-lg bg-slate-50 p-3 text-sm">

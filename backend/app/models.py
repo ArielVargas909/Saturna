@@ -2,7 +2,7 @@
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.timeutil import utcnow
@@ -25,6 +25,9 @@ class Tenant(Base):
     custody_fee: Mapped[Decimal] = mapped_column(MONEY, default=Decimal("5.00"))
     late_fee_per_day: Mapped[Decimal] = mapped_column(MONEY, default=Decimal("2.00"))
     opening_hours: Mapped[str] = mapped_column(String(120), default="Lun-Sáb 09:00 a 19:00")
+    latitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    maps_url: Mapped[str] = mapped_column(String(300), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
@@ -54,6 +57,7 @@ class Package(Base):
     received_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     custody_deadline: Mapped[datetime] = mapped_column(DateTime)
+    scheduled_pickup_at: Mapped[str] = mapped_column(String(120), default="")
     events: Mapped[list["PackageEvent"]] = relationship(
         back_populates="package", order_by="PackageEvent.id", cascade="all, delete-orphan"
     )

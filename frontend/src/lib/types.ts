@@ -19,6 +19,9 @@ export interface Tenant {
   custody_fee: string;
   late_fee_per_day: string;
   opening_hours: string;
+  latitude: number | null;
+  longitude: number | null;
+  maps_url: string;
 }
 export type PlanKey = "free" | "basic" | "premium";
 export interface Plan {
@@ -44,6 +47,7 @@ export interface Pkg {
   received_at: string;
   delivered_at: string | null;
   custody_deadline: string;
+  scheduled_pickup_at: string;
 }
 export interface Fees {
   base: string;
@@ -98,9 +102,19 @@ export interface ValidateOut {
   fees: Fees;
   expires_at: string;
 }
+export interface AgentOutboxItem {
+  type: string;
+  url?: string;
+  caption?: string;
+  latitude?: number | null;
+  longitude?: number | null;
+  name?: string;
+  address?: string;
+  maps_url?: string;
+}
 export interface AgentReply {
   reply: string;
-  outbox: { type: string; url: string; caption?: string }[];
+  outbox: AgentOutboxItem[];
   role: string;
   tools: string[];
   mode: "llm" | "offline";

@@ -64,6 +64,9 @@ class TenantOut(ORM):
     custody_fee: Decimal
     late_fee_per_day: Decimal
     opening_hours: str
+    latitude: float | None = None
+    longitude: float | None = None
+    maps_url: str = ""
 
 
 class TenantUpdate(BaseModel):
@@ -75,6 +78,9 @@ class TenantUpdate(BaseModel):
     custody_fee: Decimal | None = Field(None, ge=0, le=1000)
     late_fee_per_day: Decimal | None = Field(None, ge=0, le=1000)
     opening_hours: str | None = Field(None, max_length=120)
+    latitude: float | None = Field(None, ge=-90, le=90)
+    longitude: float | None = Field(None, ge=-180, le=180)
+    maps_url: str | None = Field(None, max_length=300)
 
 
 class PlanChange(BaseModel):
@@ -123,6 +129,7 @@ class PackageOut(ORM):
     received_at: datetime
     delivered_at: datetime | None
     custody_deadline: datetime
+    scheduled_pickup_at: str = ""
 
 
 class EventOut(ORM):

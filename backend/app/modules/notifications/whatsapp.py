@@ -177,6 +177,44 @@ def send_image(
     return _fallback_to_template(to, res, fallback_template, fallback_params)
 
 
+def send_location(
+    to: str,
+    latitude: float,
+    longitude: float,
+    name: str = "",
+    address: str = "",
+    *,
+    fallback_template: str | None = None,
+    fallback_params: list[str] | None = None,
+) -> SendResult:
+    """Envía un pin de ubicación GPS por WhatsApp (con fallback a plantilla si expiró 24 h)."""
+    if is_mock():
+        return _record(
+            {
+                "type": "location",
+                "to": to,
+                "latitude": latitude,
+                "longitude": longitude,
+                "name": name,
+                "address": address,
+            }
+        )
+    loc: dict[str, object] = {"latitude": latitude, "longitude": longitude}
+    if name:
+        loc["name"] = name
+    if address:
+        loc["address"] = address
+    res = _post(
+        {
+            "messaging_product": "whatsapp",
+            "to": to,
+            "type": "location",
+            "location": loc,
+        }
+    )
+    return _fallback_to_template(to, res, fallback_template, fallback_params)
+
+
 def send_template(to: str, template: str, params: list[str]) -> SendResult:
     """Envía una plantilla de WhatsApp con variables de texto en el cuerpo."""
     if is_mock():

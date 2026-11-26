@@ -16,9 +16,16 @@ export default function SettingsPage() {
     queryFn: () => api.get<Usage>("/tenants/me/usage"),
   });
   const [f, setF] = useState<Partial<Tenant>>({});
+  const [coords, setCoords] = useState({ lat: "", lng: "" });
   const [saved, setSaved] = useState(false);
   useEffect(() => {
-    if (tenant.data) setF(tenant.data);
+    if (tenant.data) {
+      setF(tenant.data);
+      setCoords({
+        lat: tenant.data.latitude != null ? String(tenant.data.latitude) : "",
+        lng: tenant.data.longitude != null ? String(tenant.data.longitude) : "",
+      });
+    }
   }, [tenant.data]);
   const set = (k: keyof Tenant) => (e: { target: { value: string } }) => {
     setSaved(false);
@@ -32,6 +39,9 @@ export default function SettingsPage() {
         address: f.address,
         zone: f.zone,
         opening_hours: f.opening_hours,
+        maps_url: f.maps_url ?? "",
+        latitude: coords.lat.trim() === "" ? null : Number(coords.lat),
+        longitude: coords.lng.trim() === "" ? null : Number(coords.lng),
         custody_days: Number(f.custody_days),
         qr_ttl_hours: Number(f.qr_ttl_hours),
         custody_fee: Number(f.custody_fee),
@@ -129,6 +139,42 @@ export default function SettingsPage() {
               onChange={set("opening_hours")}
             />
           </Field>
+          <Field label="Enlace de Google Maps" hint="Lo envía el agente IA al pedir ubicación">
+            <input
+              className="input"
+              placeholder="https://maps.google.com/?q=-16.5048,-68.1297"
+              value={f.maps_url ?? ""}
+              onChange={set("maps_url")}
+            />
+          </Field>
+          <div className="grid grid-cols-2 gap-2">
+            <Field label="Latitud (GPS)" hint="Pin en WhatsApp">
+              <input
+                type="number"
+                step="any"
+                className="input"
+                placeholder="-16.5048"
+                value={coords.lat}
+                onChange={(e) => {
+                  setSaved(false);
+                  setCoords({ ...coords, lat: e.target.value });
+                }}
+              />
+            </Field>
+            <Field label="Longitud (GPS)">
+              <input
+                type="number"
+                step="any"
+                className="input"
+                placeholder="-68.1297"
+                value={coords.lng}
+                onChange={(e) => {
+                  setSaved(false);
+                  setCoords({ ...coords, lng: e.target.value });
+                }}
+              />
+            </Field>
+          </div>
           <Field label="Días de custodia gratuita del plazo">
             <input
               type="number"

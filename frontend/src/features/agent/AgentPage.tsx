@@ -8,6 +8,7 @@ interface Msg {
   from: "me" | "bot";
   text: string;
   image?: string;
+  location?: { name?: string; address?: string; maps_url?: string; latitude?: number | null; longitude?: number | null };
   tools?: string[];
   mode?: "llm" | "offline";
 }
@@ -23,8 +24,21 @@ export default function AgentPage() {
         ...m,
         { from: "bot", text: r.reply, tools: r.tools, mode: r.mode },
         ...r.outbox
-          .filter((o) => o.type === "image")
+          .filter((o) => o.type === "image" && o.url)
           .map((o) => ({ from: "bot" as const, text: o.caption ?? "QR", image: o.url })),
+        ...r.outbox
+          .filter((o) => o.type === "location")
+          .map((o) => ({
+            from: "bot" as const,
+            text: o.name ?? "Ubicación",
+            location: {
+              name: o.name,
+              address: o.address,
+              maps_url: o.maps_url,
+              latitude: o.latitude,
+              longitude: o.longitude,
+            },
+          })),
       ]),
   });
   const submit = (e: FormEvent) => {
@@ -54,7 +68,8 @@ export default function AgentPage() {
       <div className="h-96 space-y-2 overflow-y-auto rounded-xl bg-app-bg p-3">
         {msgs.length === 0 && (
           <p className="pt-8 text-center text-sm text-slate-500">
-            Prueba: “hola, ¿cómo va mi paquete SAT-XXXXXX?” o “quiero mi QR”
+            Prueba: “¿cómo va mi paquete SAT-XXXXXX?”, “paso mañana a las 16:00”, “¿dónde están
+            ubicados?” o “quiero mi QR”
           </p>
         )}
         {msgs.map((m, i) => (
@@ -62,7 +77,28 @@ export default function AgentPage() {
             <div
               className={`max-w-[80%] whitespace-pre-line rounded-xl px-3 py-2 text-sm shadow-sm ${m.from === "me" ? "bg-cyan-500 text-brand-900" : "bg-white text-ink"}`}
             >
-              {m.image ? <img src={m.image} alt={m.text} className="w-44 rounded" /> : m.text}
+              {m.image ? (
+                <img src={m.image} alt={m.text} className="w-44 rounded" />
+              ) : m.location ? (
+                <div className="space-y-1">
+                  <p className="font-semibold">📍 {m.location.name || "Ubicación"}</p>
+                  {m.location.address && (
+                    <p className="text-xs text-slate-600">{m.location.address}</p>
+                  )}
+                  {m.location.maps_url && (
+                    <a
+                      href={m.location.maps_url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-block text-xs font-medium text-cyan-600 underline"
+                    >
+                      Abrir en Google Maps ↗
+                    </a>
+                  )}
+                </div>
+              ) : (
+                m.text
+              )}
               {m.mode && (
                 <p className="mt-1 text-[10px] font-semibold text-slate-500">
                   {m.mode === "llm" ? "IA real" : "Respaldo por reglas"}

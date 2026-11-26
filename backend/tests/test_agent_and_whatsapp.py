@@ -434,3 +434,82 @@ def test_webhook_multi_tenant_isolation_and_history_logging(client, owner, monke
     assert len(luna_convs) == 0
     sol_notes = client.get("/notifications", headers=owner).json()
     assert any(n["kind"] == "respuesta_ia" for n in sol_notes)
+
+
+def test_pickup_scheduling_and_multiturn_memory(client, owner, monkeypatch):
+    p = new_package(client, owner, phone="71234567")
+    # Turno 1: pregunta por el código SAT-XXXXXX
+    first = ask(client, owner, "71234567", f"¿cómo va mi paquete {p['code']}?")
+    assert p["code"] in first["reply"]
+
+    # Turno 2 (sin repetir el código): la memoria multi-turno recuerda el paquete y agenda el retiro
+    second = ask(client, owner, "71234567", "paso mañana a las 16:00 a recogerlo")
+    assert "agendar_retiro" in second["tools"]
+    assert p["code"] in second["reply"]
+
+    detail = client.get(f"/packages/{p['id']}", headers=owner).json()
+    assert "16:00" in detail["scheduled_pickup_at"]
+    assert any(e["type"] == "CITA_RETIRO" for e in detail["events"])
+
+    # Verificar también que llm.run recibe el historial de turnos anteriores
+    s = get_settings()
+    monkeypatch.setattr(s, "llm_api_key", "sk-ant-test")
+    captured_messages = []
+
+    def fake_llm(url, json=None, headers=None, timeout=None):
+        captured_messages.extend(json["messages"])
+        return FakeWhatsAppResponse(
+            200,
+            '{"stop_reason":"end_turn","content":[{"type":"text","text":"¡Perfecto, te esperamos!"}]}',
+        )
+
+    monkeypatch.setattr("app.modules.ai_agent.llm.httpx.post", fake_llm)
+    third = ask(client, owner, "71234567", "gracias, nos vemos entonces")
+    assert third["mode"] == "llm"
+    assert len(captured_messages) >= 5  # 2 turnos previos (4 msgs) + mensaje actual
+
+
+def test_location_pin_via_webhook_and_real_whatsapp_payload(client, owner, monkeypatch):
+    from app.modules.notifications import whatsapp
+
+    upd = client.patch(
+        "/tenants/me",
+        headers=owner,
+        json={
+            "address": "Av. 6 de Agosto 2170, La Paz",
+            "latitude": -16.5048,
+            "longitude": -68.1297,
+            "maps_url": "https://maps.google.com/?q=-16.5048,-68.1297",
+        },
+    )
+    assert upd.status_code == 200
+    new_package(client, owner, phone="71234567")
+
+    s = get_settings()
+    monkeypatch.setattr(s, "whatsapp_app_secret", "secreto")
+    whatsapp.SENT_LOG.clear()
+    payload = {"entry": [{"changes": [{"value": {"messages": [
+        {"id": "wamid-loc-1", "from": "59171234567", "type": "text", "text": {"body": "¿me pasas la ubicación?"}},
+    ]}}]}]}
+    body = json.dumps(payload).encode()
+    sig = "sha256=" + hmac.new(b"secreto", body, hashlib.sha256).hexdigest()
+    r = client.post("/webhooks/whatsapp", content=body, headers={"X-Hub-Signature-256": sig})
+    assert r.status_code == 200
+    assert any(m["type"] == "location" and m["latitude"] == -16.5048 for m in whatsapp.SENT_LOG)
+    notes = client.get("/notifications", headers=owner).json()
+    assert any(n["kind"] == "ubicacion" for n in notes)
+
+    # Verificar payload real de Meta Cloud API para send_location
+    monkeypatch.setattr(s, "whatsapp_token", "token-test")
+    monkeypatch.setattr(s, "whatsapp_phone_id", "phone-test")
+    sent = []
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        sent.append(json)
+        return FakeWhatsAppResponse(200, '{"messages":[{"id":"wamid-loc-ok"}]}')
+
+    monkeypatch.setattr("app.modules.notifications.whatsapp.httpx.post", fake_post)
+    res = whatsapp.send_location("59171234567", -16.5048, -68.1297, "Paquetería Sol", "Av. 6 de Agosto 2170")
+    assert res.ok and res.message_id == "wamid-loc-ok"
+    assert sent[0]["type"] == "location"
+    assert sent[0]["location"]["latitude"] == -16.5048

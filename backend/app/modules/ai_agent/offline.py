@@ -5,6 +5,18 @@ import re
 from app.modules.ai_agent import tools
 
 CODE = re.compile(r"SAT-[A-Z0-9]{6}", re.I)
+SCHEDULE_HINT = re.compile(
+    r"(agend|coordin|cita|paso |pasar[eé]|voy a |ir[eé] |puedo pasar|puedo ir|"
+    r"(hoy|ma[ñn]ana|lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado).*\d{1,2}(:\d{2})?|"
+    r"a las \d{1,2}(:\d{2})?)",
+    re.I,
+)
+TIME_EXPR = re.compile(
+    r"((?:hoy|ma[ñn]ana|pasado ma[ñn]ana|lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado)"
+    r"(?:\s+(?:a las\s+)?\d{1,2}(?::\d{2})?\s*(?:am|pm|hrs?)?|\s+(?:por la )?(?:ma[ñn]ana|tarde|noche))?"
+    r"|(?:a las\s+)?\d{1,2}(?::\d{2})?\s*(?:am|pm|hrs?)|\b\d{1,2}:\d{2}\b)",
+    re.I,
+)
 
 
 def _lines(items: list[dict]) -> str:
@@ -22,10 +34,21 @@ def _fee_suffix(r: dict) -> str:
     return f" Cobro estimado: Bs {r['cobro_estimado_bs']:.2f}."
 
 
-def respond(ctx: tools.Ctx, text: str) -> tuple[str, list[str]]:
+def _code_from_history(history: list[dict] | None) -> str:
+    for item in reversed(history or []):
+        content = item.get("content")
+        if isinstance(content, str):
+            m = CODE.search(content)
+            if m:
+                return m.group(0).upper()
+    return ""
+
+
+def respond(ctx: tools.Ctx, text: str, history: list[dict] | None = None) -> tuple[str, list[str]]:
     t = text.lower()
     m = CODE.search(text)
     code = m.group(0).upper() if m else ""
+    history_code = "" if code else _code_from_history(history)
     used: list[str] = []
 
     def call(name: str, **kw) -> dict:
@@ -53,16 +76,47 @@ def respond(ctx: tools.Ctx, text: str) -> tuple[str, list[str]]:
             else "No hay paquetes por vencer. ¡Todo al día!"
         ), used
 
+    if re.search(r"ubicaci|mapa|gps|d[oó]nde (est[aá]n|queda|quedan)|c[oó]mo lleg", t):
+        r = call("enviar_ubicacion", codigo=code or history_code)
+        if "error" in r:
+            return r["error"], used
+        lines = []
+        for u in r["ubicaciones"]:
+            map_txt = f" Mapa: {u['maps_url']}" if u["maps_url"] else ""
+            lines.append(f"{u['nombre']}: {u['direccion']} (Horario: {u['horario']}).{map_txt}")
+        return "\n".join(lines), used
+
+    if ctx.role == "buyer" and SCHEDULE_HINT.search(text) and not re.search(r"\bqr\b", t):
+        target_code = code or history_code
+        if not target_code:
+            r = call("listar_mis_paquetes")
+            if len(r["paquetes"]) == 1:
+                target_code = r["paquetes"][0]["codigo"]
+            else:
+                return "¿Para qué paquete quieres agendar el retiro? Envíame el código (ej. SAT-AB12CD).", used
+        tm = TIME_EXPR.search(text)
+        slot = tm.group(0).strip() if tm else ""
+        if not slot:
+            return f"¿Qué día y hora aproximada pasarás por {target_code}? (Ej: Mañana 16:00).", used
+        r = call("agendar_retiro", codigo=target_code, horario=slot)
+        if "error" in r:
+            return r["error"], used
+        return (
+            f"¡Listo! Anotamos tu retiro para {r['codigo']}: {r['horario_acordado']} en {r['paqueteria']} "
+            f"(atención: {r['horario_atencion']}). Cuando vayas, escríbeme “QR {r['codigo']}”."
+        ), used
+
     if re.search(r"horario|atienden|abren|abre|direcci|condici|requisit|tarifa|cu[aá]nto cuesta|recargo|c[oó]mo retir", t):
-        if code and re.search(r"recargo|tarifa|cuesta|pagar|costo", t):
-            r = call("consultar_estado_paquete", codigo=code)
+        target_code = code or history_code
+        if target_code and re.search(r"recargo|tarifa|cuesta|pagar|costo", t):
+            r = call("consultar_estado_paquete", codigo=target_code)
             if "error" in r:
                 return r["error"], used
             return (
                 f"Tu paquete {r['codigo']} en {r['paqueteria']}: {r['estado']}. "
                 f"Plazo hasta {r['plazo_custodia_hasta']}.{_fee_suffix(r)}"
             ), used
-        r = call("horario_de_atencion", codigo=code)
+        r = call("horario_de_atencion", codigo=target_code)
         if not r["paqueterias"]:
             return "No encuentro paquetes asociados a tu número.", used
         lines = []
@@ -75,13 +129,14 @@ def respond(ctx: tools.Ctx, text: str) -> tuple[str, list[str]]:
         return "\n".join(lines), used
 
     if re.search(r"\bqr\b|retir|recoger|recojo", t):
-        if not code:
+        target_code = code or history_code
+        if not target_code:
             r = call("listar_mis_paquetes")
             if len(r["paquetes"]) == 1:
-                code = r["paquetes"][0]["codigo"]
+                target_code = r["paquetes"][0]["codigo"]
             else:
                 return "¿De qué paquete? Envíame el código (ej. SAT-AB12CD).", used
-        r = call("solicitar_qr_retiro", codigo=code)
+        r = call("solicitar_qr_retiro", codigo=target_code)
         if "error" in r:
             return r["error"], used
         return (
@@ -93,9 +148,10 @@ def respond(ctx: tools.Ctx, text: str) -> tuple[str, list[str]]:
         r = call("consultar_estado_paquete", codigo=code)
         if "error" in r:
             return r["error"], used
+        cita = f" Retiro agendado: {r['horario_retiro_acordado']}." if r.get("horario_retiro_acordado") else ""
         return (
             f"Tu paquete {r['codigo']} en {r['paqueteria']}: {r['estado']}. "
-            f"Llegó el {r['llego']}; plazo hasta {r['plazo_custodia_hasta']}.{_fee_suffix(r)}"
+            f"Llegó el {r['llego']}; plazo hasta {r['plazo_custodia_hasta']}.{cita}{_fee_suffix(r)}"
         ), used
 
     r = call("listar_mis_paquetes")

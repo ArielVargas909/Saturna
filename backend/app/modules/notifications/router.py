@@ -151,6 +151,27 @@ def process_incoming(payload: dict) -> None:
                                 img_res,
                                 item.get("caption", "QR de retiro"),
                             )
+                        elif (
+                            item["type"] == "location"
+                            and item.get("latitude") is not None
+                            and item.get("longitude") is not None
+                        ):
+                            loc_res = whatsapp.send_location(
+                                phone,
+                                float(item["latitude"]),
+                                float(item["longitude"]),
+                                item.get("name", ""),
+                                item.get("address", ""),
+                                fallback_template=fallback_tpl,
+                                fallback_params=fallback_params,
+                            )
+                            _log_reply_notification(
+                                result.get("tenant_id"),
+                                result.get("package_id"),
+                                "ubicacion",
+                                loc_res,
+                                item.get("address") or item.get("name") or "Ubicación de paquetería",
+                            )
                 except Exception as exc:
                     log.exception("Error procesando mensaje entrante de WhatsApp: %s", str(exc)[:300])
 

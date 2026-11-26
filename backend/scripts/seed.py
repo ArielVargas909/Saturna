@@ -33,8 +33,16 @@ def run() -> None:
         owner = db.scalar(select(User).where(User.email == "dueno@saturna.com"))
         t = db.get(Tenant, owner.tenant_id) if owner else None
         if t is None:
-            t = Tenant(name="Paquetería Illimani", address="Av. 6 de Agosto 2170, La Paz", zone="La Paz",
-                       plan="premium", opening_hours="Lun-Sáb 09:00 a 19:30")
+            t = Tenant(
+                name="Paquetería Illimani",
+                address="Av. 6 de Agosto 2170, La Paz",
+                zone="La Paz",
+                plan="premium",
+                opening_hours="Lun-Sáb 09:00 a 19:30",
+                latitude=-16.5048,
+                longitude=-68.1297,
+                maps_url="https://maps.google.com/?q=-16.5048,-68.1297",
+            )
             db.add(t)
             db.flush()
         else:
@@ -43,6 +51,9 @@ def run() -> None:
             t.zone = "La Paz"
             t.plan = "premium"
             t.opening_hours = "Lun-Sáb 09:00 a 19:30"
+            t.latitude = -16.5048
+            t.longitude = -68.1297
+            t.maps_url = "https://maps.google.com/?q=-16.5048,-68.1297"
         package_ids = select(Package.id).where(Package.tenant_id == t.id)
         db.execute(delete(Payment).where(Payment.package_id.in_(package_ids)))
         db.execute(delete(PackageEvent).where(PackageEvent.package_id.in_(package_ids)))

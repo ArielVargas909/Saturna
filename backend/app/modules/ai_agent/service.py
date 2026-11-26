@@ -13,6 +13,7 @@ from app.modules.tenants import service as tenants
 log = logging.getLogger("saturna.agent")
 LIMIT_MSG = "Por ahora no puedo atender más consultas automáticas este mes. Acércate a ventanilla, por favor."
 NO_PKG_MSG = "No encuentro paquetes asociados a tu número. Revisa que sea el mismo que dejaste en la paquetería."
+MEMORY_TURNS = 6
 
 
 def resolve_context(
@@ -45,6 +46,23 @@ def resolve_context(
     effective_scope = tenant_scope or tid
     ctx = tools.Ctx(db=db, phone=phone, role="buyer", tenant_scope=effective_scope)
     return ctx, (db.get(Tenant, tid) if tid else None)
+
+
+def _recent_history(db: Session, tenant_id: int, phone: str) -> list[dict]:
+    """Recupera los últimos turnos del chat (solo de ese tenant y teléfono) para memoria multi-turno."""
+    rows = db.scalars(
+        select(AIConversation)
+        .where(AIConversation.tenant_id == tenant_id, AIConversation.phone == phone)
+        .order_by(AIConversation.id.desc())
+        .limit(MEMORY_TURNS)
+    ).all()
+    history: list[dict] = []
+    for row in reversed(rows):
+        if row.user_message:
+            history.append({"role": "user", "content": row.user_message})
+        if row.reply:
+            history.append({"role": "assistant", "content": row.reply})
+    return history
 
 
 def _fallback_params(db: Session, ctx: tools.Ctx, tenant: Tenant) -> list[str] | None:
@@ -116,18 +134,19 @@ def handle_message(db: Session, raw_phone: str, text: str, tenant_scope: int | N
             "limit_reached": True,
         }
 
+    history = _recent_history(db, tenant.id, phone)
     used: list[str] = []
     mode = "offline"
     try:
         if get_settings().llm_api_key:
-            reply, used = llm.run(ctx, text)
+            reply, used = llm.run(ctx, text, history=history)
             mode = "llm"
         else:
-            reply, used = offline.respond(ctx, text)
+            reply, used = offline.respond(ctx, text, history=history)
     except Exception as exc:  # si el LLM falla (red, 429/límite externo, etc.), responde el agente por reglas
         log.error("Fallo del LLM; usando agente offline: %s", str(exc)[:300])
         ctx.outbox.clear()
-        reply, used = offline.respond(ctx, text)
+        reply, used = offline.respond(ctx, text, history=history)
         mode = "offline"
 
     reply = reply or "No pude entender tu consulta. ¿Me envías el código de tu paquete (SAT-XXXXXX)?"
