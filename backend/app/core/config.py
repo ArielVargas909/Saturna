@@ -29,9 +29,14 @@ class Settings(BaseSettings):
     whatsapp_template_lang: str = "es"
     whatsapp_graph_version: str = "v21.0"
 
-    # Modelo de lenguaje (si LLM_API_KEY está vacío se usa el agente offline por reglas)
+    # Modelo de lenguaje (vacío = agente offline por reglas; soporta Gemini y Anthropic)
     llm_api_key: str = ""
-    llm_model: str = "claude-haiku-4-5-20251001"
+    gemini_api_key: str = ""
+    llm_model: str = "gemini-flash-lite-latest"
+
+    @property
+    def active_llm_api_key(self) -> str:
+        return (self.llm_api_key or self.gemini_api_key).strip()
 
     default_country_code: str = "591"  # Bolivia
 

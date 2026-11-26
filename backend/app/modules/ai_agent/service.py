@@ -138,7 +138,7 @@ def handle_message(db: Session, raw_phone: str, text: str, tenant_scope: int | N
     used: list[str] = []
     mode = "offline"
     try:
-        if get_settings().llm_api_key:
+        if get_settings().active_llm_api_key:
             reply, used = llm.run(ctx, text, history=history)
             mode = "llm"
         else:

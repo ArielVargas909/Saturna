@@ -357,6 +357,7 @@ def test_llm_online_tool_use_and_automatic_offline_fallback(client, owner, monke
     p = new_package(client, owner, phone="71234567")
     s = get_settings()
     monkeypatch.setattr(s, "llm_api_key", "sk-ant-test")
+    monkeypatch.setattr(s, "llm_model", "claude-haiku-4-5-20251001")
 
     turn = {"n": 0}
 
@@ -454,6 +455,7 @@ def test_pickup_scheduling_and_multiturn_memory(client, owner, monkeypatch):
     # Verificar también que llm.run recibe el historial de turnos anteriores
     s = get_settings()
     monkeypatch.setattr(s, "llm_api_key", "sk-ant-test")
+    monkeypatch.setattr(s, "llm_model", "claude-haiku-4-5-20251001")
     captured_messages = []
 
     def fake_llm(url, json=None, headers=None, timeout=None):
@@ -513,3 +515,65 @@ def test_location_pin_via_webhook_and_real_whatsapp_payload(client, owner, monke
     assert res.ok and res.message_id == "wamid-loc-ok"
     assert sent[0]["type"] == "location"
     assert sent[0]["location"]["latitude"] == -16.5048
+
+
+def test_gemini_function_calling_online(client, owner, monkeypatch):
+    p = new_package(client, owner, phone="71234567")
+    s = get_settings()
+    monkeypatch.setattr(s, "llm_api_key", "AQ.fake-gemini-key")
+    monkeypatch.setattr(s, "llm_model", "gemini-flash-lite-latest")
+
+    calls = []
+
+    def fake_gemini(url, params=None, json=None, timeout=None):
+        calls.append((url, params, json))
+        if len(calls) == 1:
+            return FakeWhatsAppResponse(
+                200,
+                json_lib.dumps(
+                    {
+                        "candidates": [
+                            {
+                                "content": {
+                                    "role": "model",
+                                    "parts": [
+                                        {
+                                            "functionCall": {
+                                                "name": "consultar_estado_paquete",
+                                                "args": {"codigo": p["code"]},
+                                            },
+                                            "thoughtSignature": "sig-123",
+                                        }
+                                    ],
+                                }
+                            }
+                        ]
+                    }
+                ),
+            )
+        return FakeWhatsAppResponse(
+            200,
+            json_lib.dumps(
+                {
+                    "candidates": [
+                        {
+                            "content": {
+                                "role": "model",
+                                "parts": [{"text": f"Hola, tu paquete {p['code']} está listo en ventanilla."}],
+                            }
+                        }
+                    ]
+                }
+            ),
+        )
+
+    json_lib = json
+    monkeypatch.setattr("app.modules.ai_agent.llm.httpx.post", fake_gemini)
+    r = ask(client, owner, "71234567", f"hola, cómo va {p['code']}")
+    assert r["mode"] == "llm"
+    assert "consultar_estado_paquete" in r["tools"]
+    assert p["code"] in r["reply"]
+    assert "generativelanguage.googleapis.com" in calls[0][0]
+    assert calls[0][1] == {"key": "AQ.fake-gemini-key"}
+    # Preserva thoughtSignature en el segundo turno de function calling
+    assert calls[1][2]["contents"][-2]["parts"][0]["thoughtSignature"] == "sig-123"
