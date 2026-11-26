@@ -130,6 +130,8 @@ class PackageOut(ORM):
     delivered_at: datetime | None
     custody_deadline: datetime
     scheduled_pickup_at: str = ""
+    scheduled_qr_send_at: datetime | None = None
+    scheduled_qr_sent_at: datetime | None = None
 
 
 class EventOut(ORM):

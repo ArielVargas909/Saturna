@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.plans import plan_of
 from app.core.text import title_name
-from app.core.timeutil import to_local, today_start_utc, utcnow
+from app.core.timeutil import parse_pickup_datetime_utc, to_local, today_start_utc, utcnow
 from app.models import Package, Tenant
 from app.modules.analytics import service as analytics
 from app.modules.packages import service as pkgs
@@ -147,25 +147,72 @@ def solicitar_qr_retiro(ctx: Ctx, codigo: str = "") -> dict:
     }
 
 
-def agendar_retiro(ctx: Ctx, codigo: str = "", horario: str = "") -> dict:
-    """Acuerda el horario de retiro de un paquete abierto y envía automáticamente su QR de un solo uso."""
+QR_LEAD_MINUTES = 10
+
+
+def agendar_retiro(ctx: Ctx, codigo: str = "", horario: str = "", fecha_hora_iso: str = "") -> dict:
+    """Acuerda la hora de retiro y programa el envío del QR 10 minutos antes (o de inmediato si falta <= 10 min)."""
     if ctx.role != "buyer":
         return {"error": "Solo el comprador puede agendar el horario de retiro."}
     clean_schedule = " ".join((horario or "").split())[:120]
     if len(clean_schedule) < 3:
-        return {"error": "Indica qué día y hora aproximada pasarás a recoger tu paquete."}
+        return {"error": "Indica qué día y hora concreta pasarás a recoger tu paquete (ej. hoy 17:00)."}
     pkg = _find(ctx, codigo)
     if pkg is None:
         return {"error": "No encontré un paquete con ese código asociado a tu número."}
     if pkg.state not in pkgs.OPEN_STATES:
         return {"error": "Ese paquete ya fue entregado, devuelto o venció."}
+
+    now = utcnow()
+    pickup_utc = parse_pickup_datetime_utc(clean_schedule, iso_hint=fecha_hora_iso, now_utc=now)
+    if pickup_utc is None:
+        return {
+            "error": (
+                "Indica una hora concreta (por ejemplo 'hoy 17:00' o 'mañana 16:30') "
+                "para programar tu QR 10 minutos antes de tu llegada."
+            )
+        }
+
     ctx.last_package_id = pkg.id
     ctx.last_package_code = pkg.code
     tenant = ctx.db.get(Tenant, pkg.tenant_id)
-    pkg.scheduled_pickup_at = clean_schedule
-    pkgs.add_event(ctx.db, pkg.id, "CITA_RETIRO", f"Horario de retiro acordado: {clean_schedule}", None)
-    token, expires = qr.issue_token(ctx.db, tenant, pkg, None)
     fees = pkgs.compute_fees(tenant, pkg)
+    send_at = pickup_utc - timedelta(minutes=QR_LEAD_MINUTES)
+    pkg.scheduled_pickup_at = clean_schedule
+
+    if send_at > now:
+        pkg.scheduled_qr_send_at = send_at
+        pkg.scheduled_qr_sent_at = None
+        pkgs.add_event(
+            ctx.db,
+            pkg.id,
+            "CITA_RETIRO",
+            f"Horario acordado: {clean_schedule}. QR programado para {_fmt(send_at)} (10 min antes).",
+            None,
+        )
+        ctx.db.commit()
+        return {
+            "ok": True,
+            "codigo": pkg.code,
+            "horario_acordado": clean_schedule,
+            "hora_retiro": _fmt(pickup_utc),
+            "paqueteria": tenant.name,
+            "horario_atencion": tenant.opening_hours,
+            "direccion": tenant.address,
+            "qr_enviado": False,
+            "qr_programado_para": _fmt(send_at),
+            "cobro_estimado_bs": float(fees["total"]),
+            "dias_de_retraso": fees["days_late"],
+            "nota": (
+                f"Por seguridad, tu QR de un solo uso se enviará automáticamente el {_fmt(send_at)} "
+                "(10 minutos antes de tu hora acordada)."
+            ),
+        }
+
+    pkg.scheduled_qr_send_at = now
+    pkg.scheduled_qr_sent_at = now
+    pkgs.add_event(ctx.db, pkg.id, "CITA_RETIRO", f"Horario acordado: {clean_schedule} (QR enviado de inmediato).", None)
+    token, expires = qr.issue_token(ctx.db, tenant, pkg, None)
     url = f"{get_settings().public_base_url.rstrip('/')}/qr/image/{token}.png"
     ctx.outbox.append(
         {
@@ -179,6 +226,7 @@ def agendar_retiro(ctx: Ctx, codigo: str = "", horario: str = "") -> dict:
         "ok": True,
         "codigo": pkg.code,
         "horario_acordado": clean_schedule,
+        "hora_retiro": _fmt(pickup_utc),
         "paqueteria": tenant.name,
         "horario_atencion": tenant.opening_hours,
         "direccion": tenant.address,
@@ -186,7 +234,7 @@ def agendar_retiro(ctx: Ctx, codigo: str = "", horario: str = "") -> dict:
         "qr_vence": _fmt(expires),
         "cobro_estimado_bs": float(fees["total"]),
         "dias_de_retraso": fees["days_late"],
-        "nota": "Horario registrado y QR de retiro de un solo uso enviado automáticamente como imagen.",
+        "nota": "Como tu llegada es en menos de 10 minutos, ya te enviamos tu QR de retiro de un solo uso.",
     }
 
 
@@ -305,12 +353,16 @@ SCHEMAS = {
     "listar_mis_paquetes": ("Lista los paquetes pendientes asociados al número de quien escribe.", _NONE),
     "solicitar_qr_retiro": ("Emite el QR de un solo uso para retirar un paquete y lo envía por WhatsApp.", _CODE),
     "agendar_retiro": (
-        "Guarda el día y hora acordados con el comprador para recoger su paquete.",
+        "Guarda la hora acordada para recoger el paquete y programa el envío del QR 10 minutos antes por seguridad.",
         {
             "type": "object",
             "properties": {
                 "codigo": {"type": "string", "description": "Código SAT-XXXXXX"},
-                "horario": {"type": "string", "description": "Día y hora aproximada de retiro, ej. Mañana 16:00"},
+                "horario": {"type": "string", "description": "Día y hora concreta de retiro, ej. Hoy 17:00 o Mañana 16:00"},
+                "fecha_hora_iso": {
+                    "type": "string",
+                    "description": "Opcional: fecha y hora local de Bolivia en formato YYYY-MM-DD HH:MM",
+                },
             },
             "required": ["codigo", "horario"],
         },
@@ -353,6 +405,6 @@ def execute(ctx: Ctx, name: str, args: dict) -> dict:
     if name not in ALLOWED[ctx.role]:
         return {"error": "Herramienta no disponible."}
     fn = REGISTRY[name]
-    allowed = {"codigo", "periodo", "horario"} & set(fn.__code__.co_varnames[: fn.__code__.co_argcount])
+    allowed = {"codigo", "periodo", "horario", "fecha_hora_iso"} & set(fn.__code__.co_varnames[: fn.__code__.co_argcount])
     clean = {k: str(v)[:120] for k, v in (args or {}).items() if k in allowed}  # tenant_id jamás pasa
     return fn(ctx, **clean)

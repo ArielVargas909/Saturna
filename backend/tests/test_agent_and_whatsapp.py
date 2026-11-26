@@ -446,18 +446,40 @@ def test_pickup_scheduling_and_multiturn_memory(client, owner, monkeypatch):
     first = ask(client, owner, "71234567", f"¿cómo va mi paquete {p['code']}?")
     assert p["code"] in first["reply"]
 
-    # Turno 2 (sin repetir el código): agenda el retiro y envía automáticamente el QR de un solo uso
+    # Turno 2 (sin repetir el código): agenda para mañana -> por seguridad NO envía el QR aún, lo programa 10 min antes
     second = ask(client, owner, "71234567", "paso mañana a las 16:00 a recogerlo")
     assert "agendar_retiro" in second["tools"]
     assert p["code"] in second["reply"]
-    assert any(o["type"] == "image" and o["url"].endswith(".png") and o.get("token") for o in second["outbox"])
-    qr_token = next(o["token"] for o in second["outbox"] if o["type"] == "image")
-    assert client.post("/qr/validate", headers=owner, json={"token": qr_token}).status_code == 200
+    assert second["outbox"] == []
+    assert "10 minutos antes" in second["reply"]
 
     detail = client.get(f"/packages/{p['id']}", headers=owner).json()
-    assert detail["state"] == "LISTO_PARA_RETIRO"
     assert "16:00" in detail["scheduled_pickup_at"]
+    assert detail["scheduled_qr_send_at"] is not None
+    assert detail["scheduled_qr_sent_at"] is None
     assert any(e["type"] == "CITA_RETIRO" for e in detail["events"])
+
+    # Antes de la hora programada el despachador no envía nada; al llegar los 10 min antes sí emite y envía una sola vez
+    from datetime import datetime, timedelta
+
+    from app.modules.notifications import service as notif_service
+    from app.modules.notifications import whatsapp
+
+    send_at = datetime.fromisoformat(detail["scheduled_qr_send_at"])
+    assert notif_service.dispatch_due_scheduled_qrs(now_utc=send_at - timedelta(minutes=1)) == 0
+    whatsapp.SENT_LOG.clear()
+    assert notif_service.dispatch_due_scheduled_qrs(now_utc=send_at + timedelta(seconds=5)) == 1
+    assert any(m["type"] == "image" and m["url"].endswith(".png") for m in whatsapp.SENT_LOG)
+    assert notif_service.dispatch_due_scheduled_qrs(now_utc=send_at + timedelta(minutes=2)) == 0
+    after = client.get(f"/packages/{p['id']}", headers=owner).json()
+    assert after["scheduled_qr_sent_at"] is not None
+    assert after["state"] == "LISTO_PARA_RETIRO"
+
+    # Si falta <= 10 minutos para llegar ("en 5 minutos"), se envía el QR de inmediato
+    p_now = new_package(client, owner, phone="79876543")
+    immediate = ask(client, owner, "79876543", f"llego en 5 minutos por {p_now['code']}")
+    assert "agendar_retiro" in immediate["tools"]
+    assert any(o["type"] == "image" and o.get("token") for o in immediate["outbox"])
 
     # Verificar también que llm.run recibe el historial de turnos anteriores
     s = get_settings()

@@ -1,16 +1,20 @@
 import inspect
+import logging
 from datetime import datetime
 
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.text import title_name
-from app.core.timeutil import to_local
+from app.core.timeutil import to_local, utcnow
 from app.db.session import SessionLocal
 from app.models import Notification, Package, Tenant
 from app.modules.notifications import whatsapp
 from app.modules.packages import service as pkgs
 from app.modules.tenants import service as tenants
+
+log = logging.getLogger("saturna.notifications")
 
 # Nombres posibles de campos y funciones (se prueban en este orden)
 SENDER_FIELDS = ("sender_name", "sender", "remitente", "seller_name", "shop_name")
@@ -342,6 +346,52 @@ def send_arrival_task(package_id: int) -> None:
         if tenant is None:
             return
         send_arrival(db, pkg, tenant)
+
+
+def dispatch_due_scheduled_qrs(now_utc: datetime | None = None) -> int:
+    """Emite y envía el QR de un solo uso para los paquetes cuya ventana (10 min antes) ya llegó."""
+    from app.modules.qr import service as qr_service  # import tardío para evitar ciclos
+
+    now = now_utc or utcnow()
+    dispatched = 0
+    with SessionLocal() as db:
+        due_ids = db.scalars(
+            select(Package.id).where(
+                Package.state.in_(pkgs.OPEN_STATES),
+                Package.scheduled_qr_send_at.is_not(None),
+                Package.scheduled_qr_send_at <= now,
+                Package.scheduled_qr_sent_at.is_(None),
+            )
+        ).all()
+
+    for pkg_id in due_ids:
+        with SessionLocal() as db:
+            claimed = db.execute(
+                update(Package)
+                .where(
+                    Package.id == pkg_id,
+                    Package.state.in_(pkgs.OPEN_STATES),
+                    Package.scheduled_qr_sent_at.is_(None),
+                )
+                .values(scheduled_qr_sent_at=now)
+                .returning(Package.id)
+            ).first()
+            if claimed is None:
+                db.rollback()
+                continue
+            db.commit()
+
+            pkg = db.get(Package, pkg_id)
+            tenant = db.get(Tenant, pkg.tenant_id) if pkg else None
+            if pkg is None or tenant is None:
+                continue
+            try:
+                token, expires = qr_service.issue_token(db, tenant, pkg, None)
+                send_qr_to_buyer(db, pkg, tenant, None, token, expires)
+                dispatched += 1
+            except Exception as exc:
+                log.exception("Error enviando QR programado para paquete %s: %s", pkg_id, str(exc)[:200])
+    return dispatched
 
 
 def send_pickup_ready_task(

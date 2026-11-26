@@ -6,13 +6,15 @@ from app.modules.ai_agent import tools
 
 CODE = re.compile(r"SAT-[A-Z0-9]{6}", re.I)
 SCHEDULE_HINT = re.compile(
-    r"(agend|coordin|cita|paso |pasar[eé]|voy a |ir[eé] |puedo pasar|puedo ir|"
+    r"(agend|coordin|cita|paso |pasar[eé]|voy a |ir[eé] |llego |puedo pasar|puedo ir|"
+    r"en \d{1,3}\s*(?:min|h)|"
     r"(hoy|ma[ñn]ana|lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado).*\d{1,2}(:\d{2})?|"
     r"a las \d{1,2}(:\d{2})?)",
     re.I,
 )
 TIME_EXPR = re.compile(
-    r"((?:hoy|ma[ñn]ana|pasado ma[ñn]ana|lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado)"
+    r"(en\s+\d{1,3}\s*(?:min(?:utos?)?|h(?:oras?)?|hrs?)"
+    r"|(?:hoy|ma[ñn]ana|pasado ma[ñn]ana|lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado)"
     r"(?:\s+(?:a las\s+)?\d{1,2}(?::\d{2})?\s*(?:am|pm|hrs?)?|\s+(?:por la )?(?:ma[ñn]ana|tarde|noche))?"
     r"|(?:a las\s+)?\d{1,2}(?::\d{2})?\s*(?:am|pm|hrs?)|\b\d{1,2}:\d{2}\b)",
     re.I,
@@ -101,10 +103,15 @@ def respond(ctx: tools.Ctx, text: str, history: list[dict] | None = None) -> tup
         r = call("agendar_retiro", codigo=target_code, horario=slot)
         if "error" in r:
             return r["error"], used
+        if r.get("qr_enviado"):
+            return (
+                f"¡Listo! Anotamos tu retiro para {r['codigo']}: {r['horario_acordado']} en {r['paqueteria']}. "
+                f"Como ya estás por llegar, te envié tu QR de un solo uso (vence el {r['qr_vence']}).{_fee_suffix(r)}"
+            ), used
         return (
             f"¡Listo! Anotamos tu retiro para {r['codigo']}: {r['horario_acordado']} en {r['paqueteria']} "
-            f"(atención: {r['horario_atencion']}). Ya te envié tu QR de retiro de un solo uso "
-            f"(vence el {r['qr_vence']}).{_fee_suffix(r)}"
+            f"(atención: {r['horario_atencion']}). Por seguridad, te enviaremos tu QR de un solo uso "
+            f"automáticamente el {r['qr_programado_para']} (10 minutos antes).{_fee_suffix(r)}"
         ), used
 
     if re.search(r"horario|atienden|abren|abre|direcci|condici|requisit|tarifa|cu[aá]nto cuesta|recargo|c[oó]mo retir", t):

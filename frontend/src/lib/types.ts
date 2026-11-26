@@ -48,6 +48,8 @@ export interface Pkg {
   delivered_at: string | null;
   custody_deadline: string;
   scheduled_pickup_at: string;
+  scheduled_qr_send_at: string | null;
+  scheduled_qr_sent_at: string | null;
 }
 export interface Fees {
   base: string;

@@ -58,6 +58,8 @@ class Package(Base):
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     custody_deadline: Mapped[datetime] = mapped_column(DateTime)
     scheduled_pickup_at: Mapped[str] = mapped_column(String(120), default="")
+    scheduled_qr_send_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    scheduled_qr_sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     events: Mapped[list["PackageEvent"]] = relationship(
         back_populates="package", order_by="PackageEvent.id", cascade="all, delete-orphan"
     )

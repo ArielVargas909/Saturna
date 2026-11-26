@@ -102,6 +102,17 @@ export default function PackageDetailPage() {
             <div className="col-span-2 rounded-lg bg-cyan-50 px-3 py-2 text-brand-900">
               <dt className="text-xs font-semibold text-cyan-700">Horario de retiro acordado</dt>
               <dd className="font-semibold">{p.scheduled_pickup_at}</dd>
+              {p.scheduled_qr_sent_at ? (
+                <p className="mt-0.5 text-xs text-slate-600">
+                  QR programado enviado ✔ ({dt(p.scheduled_qr_sent_at)})
+                </p>
+              ) : (
+                p.scheduled_qr_send_at && (
+                  <p className="mt-0.5 text-xs text-slate-600">
+                    Envío automático de QR: {dt(p.scheduled_qr_send_at)} (10 min antes)
+                  </p>
+                )
+              )}
             </div>
           )}
         </dl>
