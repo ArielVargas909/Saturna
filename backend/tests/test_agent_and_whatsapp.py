@@ -127,6 +127,10 @@ class FakeWhatsAppResponse:
         import json
         return json.loads(self._body)
 
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
 
 def test_simulated_notification_does_not_change_state(client, owner, db):
     from app.models import Notification
@@ -257,3 +261,176 @@ def test_send_text_and_image_real_payloads(monkeypatch):
         "link": "https://api.example.com/qr/image/abc.png",
         "caption": "QR SAT-123456",
     }
+
+
+def test_send_text_outside_24h_window_falls_back_to_template(monkeypatch):
+    from app.modules.notifications import whatsapp
+
+    s = get_settings()
+    monkeypatch.setattr(s, "whatsapp_token", "token-test")
+    monkeypatch.setattr(s, "whatsapp_phone_id", "phone-test")
+    calls = []
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        calls.append(json)
+        if len(calls) == 1:
+            return FakeWhatsAppResponse(
+                400,
+                '{"error":{"code":131047,"message":"Re-engagement message"}}',
+            )
+        return FakeWhatsAppResponse(200, '{"messages":[{"id":"wamid-fallback"}]}')
+
+    monkeypatch.setattr("app.modules.notifications.whatsapp.httpx.post", fake_post)
+    res = whatsapp.send_text(
+        "59171234567",
+        "Tu paquete está listo",
+        fallback_template="aviso_llegada",
+        fallback_params=["Ana", "SAT-123456", "Paquetería Sol"],
+    )
+    assert res.ok and res.fallback_used and res.outside_window
+    assert res.message_id == "wamid-fallback"
+    assert calls[0]["type"] == "text"
+    assert calls[1]["type"] == "template"
+    assert calls[1]["template"]["name"] == "aviso_llegada"
+
+
+def test_proactive_pickup_notice_on_state_change_and_qr_with_late_fee(client, owner, db):
+    from datetime import timedelta
+
+    from app.models import Package
+    from app.modules.notifications import whatsapp
+
+    p = new_package(client, owner, phone="71234567", name="Ana Quispe")
+    row = db.get(Package, p["id"])
+    row.custody_deadline = row.custody_deadline - timedelta(days=7)
+    db.commit()
+
+    whatsapp.SENT_LOG.clear()
+    st = client.post(
+        f"/packages/{p['id']}/state",
+        headers=owner,
+        json={"state": "LISTO_PARA_RETIRO", "detail": "En mostrador"},
+    )
+    assert st.status_code == 200
+    assert any(
+        m["type"] == "text" and p["code"] in m["text"] and "recargo" in m["text"].lower()
+        for m in whatsapp.SENT_LOG
+    )
+
+    whatsapp.SENT_LOG.clear()
+    qr_res = client.post(f"/packages/{p['id']}/qr", headers=owner)
+    assert qr_res.status_code == 200
+    token = qr_res.json()["token"]
+    assert any(m["type"] == "image" and token in m["url"] for m in whatsapp.SENT_LOG)
+    # El token emitido para el operador sigue vigente (el aviso no lo revoca)
+    assert client.post("/qr/validate", headers=owner, json={"token": token}).status_code == 200
+    notes = client.get("/notifications", headers=owner).json()
+    assert any(n["kind"] == "aviso_retiro" and n["status"] == "simulated" for n in notes)
+
+
+def test_proactive_pickup_respects_plan_notification_limit(client, owner, db, monkeypatch):
+    from app.models import UsageCounter
+
+    s = get_settings()
+    monkeypatch.setattr(s, "whatsapp_token", "token-test")
+    monkeypatch.setattr(s, "whatsapp_phone_id", "phone-test")
+    monkeypatch.setattr(
+        "app.modules.notifications.whatsapp.httpx.post",
+        lambda *args, **kwargs: FakeWhatsAppResponse(200, '{"messages":[{"id":"wamid-ok"}]}'),
+    )
+    p = new_package(client, owner, phone="71234567")
+    counter = db.query(UsageCounter).first()
+    counter.notifications = 30  # plan gratuito: 30 avisos/mes
+    db.commit()
+
+    r = client.post(
+        f"/packages/{p['id']}/state",
+        headers=owner,
+        json={"state": "LISTO_PARA_RETIRO"},
+    )
+    assert r.status_code == 200
+    notes = client.get("/notifications", headers=owner).json()
+    assert any(n["kind"] == "aviso_retiro" and n["status"] == "failed" and n["detail"] == "limite_plan" for n in notes)
+
+
+def test_llm_online_tool_use_and_automatic_offline_fallback(client, owner, monkeypatch):
+    p = new_package(client, owner, phone="71234567")
+    s = get_settings()
+    monkeypatch.setattr(s, "llm_api_key", "sk-ant-test")
+
+    turn = {"n": 0}
+
+    def fake_anthropic(*args, **kwargs):
+        turn["n"] += 1
+        if turn["n"] == 1:
+            return FakeWhatsAppResponse(
+                200,
+                json.dumps(
+                    {
+                        "stop_reason": "tool_use",
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "tu_1",
+                                "name": "consultar_estado_paquete",
+                                "input": {"codigo": p["code"]},
+                            }
+                        ],
+                    }
+                ),
+            )
+        return FakeWhatsAppResponse(
+            200,
+            json.dumps(
+                {
+                    "stop_reason": "end_turn",
+                    "content": [{"type": "text", "text": f"Tu paquete {p['code']} está listo para consulta."}],
+                }
+            ),
+        )
+
+    monkeypatch.setattr("app.modules.ai_agent.llm.httpx.post", fake_anthropic)
+    online = ask(client, owner, "71234567", f"¿cómo va {p['code']}?")
+    assert online["mode"] == "llm"
+    assert "consultar_estado_paquete" in online["tools"]
+    assert p["code"] in online["reply"]
+
+    # Si Anthropic falla (p. ej. error de red o HTTP 429), cae automáticamente al agente offline
+    def failing_anthropic(*args, **kwargs):
+        raise RuntimeError("HTTP 429 rate limit")
+
+    monkeypatch.setattr("app.modules.ai_agent.llm.httpx.post", failing_anthropic)
+    fallback = ask(client, owner, "71234567", "¿cuáles son los horarios y condiciones de retiro?")
+    assert fallback["mode"] == "offline"
+    assert "horario_de_atencion" in fallback["tools"]
+    assert "QR" in fallback["reply"]
+
+    convs = client.get("/agent/conversations", headers=owner).json()
+    assert len(convs) >= 2
+
+
+def test_webhook_multi_tenant_isolation_and_history_logging(client, owner, monkeypatch):
+    from app.modules.notifications import whatsapp
+
+    other = make_tenant(client, name="Paquetería Luna", email="luna@test.com")
+    p_sol = new_package(client, owner, phone="71234567")
+    p_luna = new_package(client, other, phone="71234567")
+
+    s = get_settings()
+    monkeypatch.setattr(s, "whatsapp_app_secret", "secreto")
+    whatsapp.SENT_LOG.clear()
+    payload = {"entry": [{"changes": [{"value": {"messages": [
+        {"id": "wamid-tenant-sol", "from": "59171234567", "type": "text", "text": {"body": f"estado {p_sol['code']}"}},
+    ]}}]}]}
+    body = json.dumps(payload).encode()
+    sig = "sha256=" + hmac.new(b"secreto", body, hashlib.sha256).hexdigest()
+    r = client.post("/webhooks/whatsapp", content=body, headers={"X-Hub-Signature-256": sig})
+    assert r.status_code == 200
+
+    assert any(m["type"] == "text" and p_sol["code"] in m["text"] and p_luna["code"] not in m["text"] for m in whatsapp.SENT_LOG)
+    sol_convs = client.get("/agent/conversations", headers=owner).json()
+    luna_convs = client.get("/agent/conversations", headers=other).json()
+    assert any(p_sol["code"] in c["reply"] for c in sol_convs)
+    assert len(luna_convs) == 0
+    sol_notes = client.get("/notifications", headers=owner).json()
+    assert any(n["kind"] == "respuesta_ia" for n in sol_notes)

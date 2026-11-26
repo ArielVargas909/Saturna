@@ -1,9 +1,11 @@
 import inspect
+from datetime import datetime
 
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.text import title_name
+from app.core.timeutil import to_local
 from app.db.session import SessionLocal
 from app.models import Notification, Package, Tenant
 from app.modules.notifications import whatsapp
@@ -61,19 +63,23 @@ def _extract_token(result):
     return None
 
 
-def _qr_png(db: Session, pkg: Package, tenant: Tenant, user_id: int | None) -> bytes:
-    """Emite el QR de retiro del paquete y devuelve la imagen PNG."""
+def _qr_png(db: Session, pkg: Package, tenant: Tenant, user_id: int | None, existing_token: str | None = None) -> bytes:
+    """Devuelve la imagen PNG del QR (usando un token ya emitido o emitiendo uno nuevo)."""
     from app.modules.qr import service as qr_service  # import tardío para evitar ciclos
 
     public = [n for n in dir(qr_service) if not n.startswith("_") and callable(getattr(qr_service, n))]
-    issue = next((getattr(qr_service, n) for n in ISSUE_NAMES if hasattr(qr_service, n)), None)
     render = next((getattr(qr_service, n) for n in PNG_NAMES if hasattr(qr_service, n)), None)
-    if issue is None or render is None:
-        raise RuntimeError("No se encontro como generar el QR. Funciones en qr/service.py: " + ", ".join(public))
-    issued = _call(issue, db=db, pkg=pkg, package=pkg, package_id=pkg.id, tenant=tenant, user_id=user_id)
-    token = _extract_token(issued)
+    if render is None:
+        raise RuntimeError("No se encontro como renderizar el QR. Funciones en qr/service.py: " + ", ".join(public))
+    token = existing_token
     if not token:
-        raise RuntimeError("El QR se emitio pero no se pudo leer el token")
+        issue = next((getattr(qr_service, n) for n in ISSUE_NAMES if hasattr(qr_service, n)), None)
+        if issue is None:
+            raise RuntimeError("No se encontro como generar el QR. Funciones en qr/service.py: " + ", ".join(public))
+        issued = _call(issue, db=db, pkg=pkg, package=pkg, package_id=pkg.id, tenant=tenant, user_id=user_id)
+        token = _extract_token(issued)
+        if not token:
+            raise RuntimeError("El QR se emitio pero no se pudo leer el token")
     png = render(token)
     if hasattr(png, "getvalue"):
         png = png.getvalue()
@@ -82,20 +88,54 @@ def _qr_png(db: Session, pkg: Package, tenant: Tenant, user_id: int | None) -> b
     return bytes(png)
 
 
+def _format_pickup_summary(
+    pkg: Package,
+    tenant: Tenant,
+    *,
+    has_qr: bool = False,
+    expires_at: datetime | None = None,
+) -> str:
+    fees = pkgs.compute_fees(tenant, pkg)
+    buyer = title_name(pkg.buyer_name) or "Cliente"
+    state_label = pkgs.LABELS.get(pkg.state, pkg.state)
+    deadline = to_local(pkg.custody_deadline).strftime("%d/%m/%Y %H:%M")
+    parts = [
+        f"Hola {buyer}, tu paquete {pkg.code} en {tenant.name} está en estado: {state_label}.",
+        f"Plazo de custodia hasta {deadline}.",
+    ]
+    if fees["days_late"] > 0:
+        parts.append(
+            f"Cobro estimado: Bs {fees['total']:.2f} "
+            f"(custodia Bs {fees['base']:.2f} + recargo Bs {fees['late']:.2f} por {fees['days_late']} día(s) de demora)."
+        )
+    else:
+        parts.append(f"Cobro de custodia: Bs {fees['total']:.2f}.")
+    if has_qr:
+        exp_txt = f" (vence {to_local(expires_at).strftime('%d/%m/%Y %H:%M')})" if expires_at else ""
+        parts.append(f"Adjuntamos tu QR de retiro de un solo uso{exp_txt}.")
+    else:
+        parts.append("Responde a este chat con tu código para recibir tu QR de retiro.")
+    return " ".join(parts)
+
+
 def send_arrival(db: Session, pkg: Package, tenant: Tenant, user_id: int | None = None) -> Notification:
     """Envía el aviso de llegada respetando el límite mensual del plan."""
     note = Notification(tenant_id=tenant.id, package_id=pkg.id, kind="aviso_llegada", status="queued")
     db.add(note)
     s = get_settings()
     if whatsapp.is_mock():
+        summary = _format_pickup_summary(pkg, tenant, has_qr=False)
+        buyer_name = title_name(pkg.buyer_name) or "Cliente"
+        whatsapp.send_template(pkg.buyer_phone, s.whatsapp_template_arrival, [buyer_name, pkg.code, tenant.name])
         note.status = "simulated"
         note.meta_message_id = None
-        note.detail = "Sin credenciales de WhatsApp; envío simulado"
+        note.detail = f"Sin credenciales de WhatsApp; envío simulado. {summary}"[:240]
         pkgs.add_event(db, pkg.id, "AVISO_SIMULADO", note.detail, user_id)
         db.commit()
         return note
     if tenants.limit_reached(db, tenant, "notifications"):
         note.status, note.detail = "failed", "limite_plan"
+        pkgs.add_event(db, pkg.id, "AVISO_FALLIDO", "Límite mensual de avisos del plan alcanzado", user_id)
         db.commit()
         return note
 
@@ -120,16 +160,99 @@ def send_arrival(db: Session, pkg: Package, tenant: Tenant, user_id: int | None 
         # Plantilla simple sin imagen: {{1}} comprador, {{2}} código, {{3}} paquetería
         res = whatsapp.send_template(pkg.buyer_phone, template, [buyer, pkg.code, tenant.name])
 
-    real_sent = res.ok and bool(res.message_id) and not res.message_id.startswith("mock-")
+    real_sent = res.ok and bool(res.message_id) and not res.simulated and not res.message_id.startswith("mock-")
     note.status = "sent" if real_sent else "failed"
     note.meta_message_id = res.message_id if real_sent else None
-    note.detail = res.detail
+    note.detail = res.detail[:240]
     if real_sent:
         tenants.increment(db, tenant.id, "notifications")
         if pkg.state == "REGISTRADO":
             pkgs.change_state(db, pkg, "NOTIFICADO", user_id, "Aviso enviado por WhatsApp")
     else:
-        pkgs.add_event(db, pkg.id, "AVISO_FALLIDO", res.detail, user_id)
+        pkgs.add_event(db, pkg.id, "AVISO_FALLIDO", res.detail[:240], user_id)
+    db.commit()
+    return note
+
+
+def send_pickup_ready(
+    db: Session,
+    pkg: Package,
+    tenant: Tenant,
+    user_id: int | None = None,
+    *,
+    token: str | None = None,
+    expires_at: datetime | None = None,
+) -> Notification:
+    """Envía un aviso proactivo cuando el paquete pasa a NOTIFICADO / LISTO_PARA_RETIRO o se emite su QR."""
+    note = Notification(tenant_id=tenant.id, package_id=pkg.id, kind="aviso_retiro", status="queued")
+    db.add(note)
+    s = get_settings()
+    summary = _format_pickup_summary(pkg, tenant, has_qr=bool(token), expires_at=expires_at)
+
+    if whatsapp.is_mock():
+        whatsapp.send_text(pkg.buyer_phone, summary)
+        if token:
+            qr_url = f"{s.public_base_url.rstrip('/')}/qr/image/{token}.png"
+            whatsapp.send_image(pkg.buyer_phone, qr_url, f"QR de retiro {pkg.code}")
+        note.status = "simulated"
+        note.meta_message_id = None
+        note.detail = summary[:240]
+        pkgs.add_event(db, pkg.id, "AVISO_SIMULADO", summary[:240], user_id)
+        db.commit()
+        return note
+
+    if tenants.limit_reached(db, tenant, "notifications"):
+        note.status, note.detail = "failed", "limite_plan"
+        pkgs.add_event(db, pkg.id, "AVISO_FALLIDO", "Límite mensual de avisos del plan alcanzado", user_id)
+        db.commit()
+        return note
+
+    template = s.whatsapp_template_arrival
+    buyer = title_name(pkg.buyer_name) or "Cliente"
+    fallback_params = [buyer, pkg.code, tenant.name]
+
+    if token and template.endswith("_qr"):
+        sender = _first_attr(pkg, SENDER_FIELDS, "una tienda")
+        place = tenant.name
+        address = _first_attr(tenant, ADDRESS_FIELDS)
+        if address:
+            place = f"{tenant.name}, {address}"
+        try:
+            png = _qr_png(db, pkg, tenant, user_id, existing_token=token)
+            media = whatsapp.upload_media(png)
+            if not media.ok:
+                raise RuntimeError(f"No se pudo subir el QR a Meta: {media.detail}")
+            res = whatsapp.send_template_image(pkg.buyer_phone, template, [buyer, sender, place], media.message_id)
+        except Exception as exc:
+            res = whatsapp.SendResult(False, detail=str(exc)[:300])
+    else:
+        res = whatsapp.send_text(
+            pkg.buyer_phone,
+            summary,
+            fallback_template=template,
+            fallback_params=fallback_params,
+        )
+        if res.ok and token and not res.fallback_used:
+            qr_url = f"{s.public_base_url.rstrip('/')}/qr/image/{token}.png"
+            img_res = whatsapp.send_image(
+                pkg.buyer_phone,
+                qr_url,
+                f"QR de retiro {pkg.code}",
+                fallback_template=template,
+                fallback_params=fallback_params,
+            )
+            if not img_res.ok:
+                res.detail = f"Texto enviado; imagen QR falló: {img_res.detail}"[:240]
+
+    real_sent = res.ok and bool(res.message_id) and not res.simulated and not res.message_id.startswith("mock-")
+    note.status = "sent" if real_sent else "failed"
+    note.meta_message_id = res.message_id if real_sent else None
+    note.detail = (res.detail or summary)[:240]
+    if real_sent:
+        tenants.increment(db, tenant.id, "notifications")
+        pkgs.add_event(db, pkg.id, "AVISO_RETIRO", note.detail, user_id)
+    else:
+        pkgs.add_event(db, pkg.id, "AVISO_FALLIDO", note.detail, user_id)
     db.commit()
     return note
 
@@ -141,4 +264,23 @@ def send_arrival_task(package_id: int) -> None:
         if pkg is None:
             return
         tenant = db.get(Tenant, pkg.tenant_id)
+        if tenant is None:
+            return
         send_arrival(db, pkg, tenant)
+
+
+def send_pickup_ready_task(
+    package_id: int,
+    user_id: int | None = None,
+    token: str | None = None,
+    expires_at: datetime | None = None,
+) -> None:
+    """Tarea en segundo plano para aviso proactivo de retiro (estado notificable o emisión de QR)."""
+    with SessionLocal() as db:
+        pkg = db.get(Package, package_id)
+        if pkg is None or pkg.state in ("ENTREGADO", "DEVUELTO", "VENCIDO"):
+            return
+        tenant = db.get(Tenant, pkg.tenant_id)
+        if tenant is None:
+            return
+        send_pickup_ready(db, pkg, tenant, user_id, token=token, expires_at=expires_at)

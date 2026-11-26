@@ -26,8 +26,10 @@ class Ctx:
     role: str  # buyer | owner | operator
     tenant_id: int | None = None  # solo personal de la paquetería
     user_id: int | None = None
-    tenant_scope: int | None = None  # restringe consultas del comprador (simulador)
+    tenant_scope: int | None = None  # restringe consultas del comprador a un solo tenant
     outbox: list[dict] = field(default_factory=list)
+    last_package_id: int | None = None
+    last_package_code: str = ""
 
 
 def _fmt(dt) -> str:
@@ -50,6 +52,8 @@ def consultar_estado_paquete(ctx: Ctx, codigo: str = "") -> dict:
     pkg = _find(ctx, codigo)
     if pkg is None:
         return {"error": "No encontré un paquete con ese código asociado a tu número."}
+    ctx.last_package_id = pkg.id
+    ctx.last_package_code = pkg.code
     tenant = ctx.db.get(Tenant, pkg.tenant_id)
     out = {
         "codigo": pkg.code,
@@ -60,6 +64,8 @@ def consultar_estado_paquete(ctx: Ctx, codigo: str = "") -> dict:
     }
     if pkg.state in pkgs.OPEN_STATES:
         fees = pkgs.compute_fees(tenant, pkg)
+        out["tarifa_base_bs"] = float(fees["base"])
+        out["recargo_bs"] = float(fees["late"])
         out["cobro_estimado_bs"] = float(fees["total"])
         out["dias_de_retraso"] = fees["days_late"]
     return out
@@ -74,6 +80,9 @@ def listar_mis_paquetes(ctx: Ctx) -> dict:
     else:
         stmt = stmt.where(Package.tenant_id == ctx.tenant_id)
     rows = ctx.db.scalars(stmt.order_by(Package.id.desc()).limit(10)).all()
+    if len(rows) == 1:
+        ctx.last_package_id = rows[0].id
+        ctx.last_package_code = rows[0].code
     return {
         "paquetes": [
             {"codigo": p.code, "estado": pkgs.LABELS.get(p.state, p.state),
@@ -89,20 +98,44 @@ def solicitar_qr_retiro(ctx: Ctx, codigo: str = "") -> dict:
     pkg = _find(ctx, codigo)
     if pkg is None:
         return {"error": "No encontré un paquete con ese código asociado a tu número."}
+    if pkg.state not in pkgs.OPEN_STATES:
+        return {"error": "Ese paquete ya fue entregado, devuelto o venció."}
+    ctx.last_package_id = pkg.id
+    ctx.last_package_code = pkg.code
     tenant = ctx.db.get(Tenant, pkg.tenant_id)
     try:
         token, expires = qr.issue_token(ctx.db, tenant, pkg, None)
     except Exception:  # paquete cerrado, etc.
         return {"error": "Ese paquete ya fue entregado o devuelto."}
-    url = f"{get_settings().public_base_url}/qr/image/{token}.png"
+    fees = pkgs.compute_fees(tenant, pkg)
+    url = f"{get_settings().public_base_url.rstrip('/')}/qr/image/{token}.png"
     ctx.outbox.append({"type": "image", "url": url, "caption": f"QR de retiro {pkg.code}"})
-    return {"ok": True, "vence": _fmt(expires), "nota": "El QR se envió como imagen; sirve una sola vez."}
+    return {
+        "ok": True,
+        "codigo": pkg.code,
+        "vence": _fmt(expires),
+        "cobro_estimado_bs": float(fees["total"]),
+        "dias_de_retraso": fees["days_late"],
+        "nota": "El QR se envió como imagen; sirve una sola vez.",
+    }
+
+
+def _tenant_conditions(t: Tenant) -> dict:
+    return {
+        "nombre": t.name,
+        "direccion": t.address,
+        "horario": t.opening_hours,
+        "dias_custodia": t.custody_days,
+        "tarifa_custodia_bs": float(t.custody_fee),
+        "recargo_diario_bs": float(t.late_fee_per_day),
+        "condiciones_retiro": "Presenta tu QR de retiro de un solo uso en ventanilla y confirma el pago (efectivo o QR).",
+    }
 
 
 def horario_de_atencion(ctx: Ctx, codigo: str = "") -> dict:
     if ctx.role != "buyer":
         t = ctx.db.get(Tenant, ctx.tenant_id)
-        return {"paqueterias": [{"nombre": t.name, "direccion": t.address, "horario": t.opening_hours}]}
+        return {"paqueterias": [_tenant_conditions(t)]}
     stmt = select(Package.tenant_id).where(Package.buyer_phone == ctx.phone)
     if codigo:
         stmt = stmt.where(Package.code == codigo.strip().upper())
@@ -110,7 +143,7 @@ def horario_de_atencion(ctx: Ctx, codigo: str = "") -> dict:
         stmt = stmt.where(Package.tenant_id == ctx.tenant_scope)
     ids = set(ctx.db.scalars(stmt).all())
     tenants = [ctx.db.get(Tenant, i) for i in ids]
-    return {"paqueterias": [{"nombre": t.name, "direccion": t.address, "horario": t.opening_hours} for t in tenants]}
+    return {"paqueterias": [_tenant_conditions(t) for t in tenants if t is not None]}
 
 
 def _premium_only(ctx: Ctx) -> dict | None:
@@ -150,7 +183,7 @@ def paquetes_estancados(ctx: Ctx) -> dict:
         .order_by(Package.custody_deadline)
         .limit(10)
     ).all()
-    return {"paquetes": [{"codigo": p.code,     "comprador": title_name(p.buyer_name) or p.buyer_phone,
+    return {"paquetes": [{"codigo": p.code, "comprador": title_name(p.buyer_name) or p.buyer_phone,
                           "estado": pkgs.LABELS.get(p.state, p.state), "plazo_hasta": _fmt(p.custody_deadline)}
                          for p in rows]}
 
@@ -164,10 +197,10 @@ _CODE = {"type": "object", "properties": {"codigo": {"type": "string", "descript
 _NONE = {"type": "object", "properties": {}}
 
 SCHEMAS = {
-    "consultar_estado_paquete": ("Devuelve estado, fecha de llegada y plazo de custodia de un paquete.", _CODE),
+    "consultar_estado_paquete": ("Devuelve estado, fecha de llegada, plazo de custodia y cobro estimado de un paquete.", _CODE),
     "listar_mis_paquetes": ("Lista los paquetes pendientes asociados al número de quien escribe.", _NONE),
     "solicitar_qr_retiro": ("Emite el QR de un solo uso para retirar un paquete y lo envía por WhatsApp.", _CODE),
-    "horario_de_atencion": ("Horario y dirección de la paquetería.",
+    "horario_de_atencion": ("Horario, dirección, tarifas y condiciones de retiro de la paquetería.",
                             {"type": "object", "properties": {"codigo": {"type": "string"}}}),
     "resumen_cobros": ("Resumen de cobros registrados (solo propietario).",
                        {"type": "object", "properties": {"periodo": {"type": "string", "enum": ["hoy", "semana", "mes"]}}}),

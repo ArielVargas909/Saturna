@@ -2,7 +2,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 
 from app.core.deps import DB, CurrentTenant, CurrentUser, Owner
 from app.core.phone import normalize_phone
-from app.modules.notifications.service import send_arrival_task
+from app.modules.notifications.service import send_arrival_task, send_pickup_ready_task
 from app.modules.packages import service
 from app.modules.qr import service as qr_service
 from app.schemas import (
@@ -117,11 +117,21 @@ def deliver_package(
 
 
 @router.post("/{package_id}/state", response_model=PackageOut)
-def manual_state(package_id: int, data: StateChange, db: DB, tenant: CurrentTenant, user: CurrentUser):
-    """Cambios manuales (p. ej. devolver al remitente). ENTREGADO solo se logra con QR validado."""
+def manual_state(
+    package_id: int,
+    data: StateChange,
+    bg: BackgroundTasks,
+    db: DB,
+    tenant: CurrentTenant,
+    user: CurrentUser,
+):
+    """Cambios manuales (p. ej. listo para retiro o devolver). ENTREGADO requiere QR o /deliver."""
     pkg = service.get_owned(db, tenant.id, package_id)
+    previous = pkg.state
     service.change_state(db, pkg, data.state, user.id, data.detail)
     db.commit()
+    if pkg.state != previous and pkg.state in ("NOTIFICADO", "LISTO_PARA_RETIRO"):
+        bg.add_task(send_pickup_ready_task, pkg.id, user.id)
     return pkg
 
 

@@ -74,7 +74,34 @@ def _valid_signature(body: bytes, header: str | None) -> bool:
     return hmac.compare_digest(expected, header.removeprefix("sha256="))
 
 
+def _log_reply_notification(
+    tenant_id: int | None,
+    package_id: int | None,
+    kind: str,
+    res: whatsapp.SendResult,
+    preview: str,
+) -> None:
+    if tenant_id is None:
+        return
+    status = "simulated" if res.simulated else ("sent" if res.ok else "failed")
+    meta_id = None if (res.simulated or not res.ok or res.message_id.startswith("mock-")) else res.message_id
+    detail = (res.detail or preview)[:240]
+    with SessionLocal() as db:
+        db.add(
+            Notification(
+                tenant_id=tenant_id,
+                package_id=package_id,
+                kind=kind,
+                status=status,
+                meta_message_id=meta_id,
+                detail=detail,
+            )
+        )
+        db.commit()
+
+
 def process_incoming(payload: dict) -> None:
+    s = get_settings()
     for entry in payload.get("entry", []):
         for change in entry.get("changes", []):
             value = change.get("value", {})
@@ -82,16 +109,50 @@ def process_incoming(payload: dict) -> None:
                 continue
             for msg in value.get("messages", []):
                 phone = msg.get("from", "")
-                if msg.get("type") == "text":
-                    text = msg["text"]["body"]
-                else:  # audios e imágenes quedan fuera del MVP
+                msg_type = msg.get("type")
+                if msg_type == "text":
+                    text = msg.get("text", {}).get("body", "")
+                else:  # audios, imágenes y eventos de estado quedan fuera del MVP
+                    log.info("Mensaje WhatsApp ignorado por tipo=%s", msg_type)
                     continue
-                with SessionLocal() as db:
-                    result = agent.handle_message(db, phone, text)
-                whatsapp.send_text(phone, result["reply"])
-                for item in result["outbox"]:
-                    if item["type"] == "image":
-                        whatsapp.send_image(phone, item["url"], item.get("caption", ""))
+                if not text:
+                    continue
+                try:
+                    with SessionLocal() as db:
+                        result = agent.handle_message(db, phone, text)
+                    fallback_params = result.get("fallback_params")
+                    fallback_tpl = s.whatsapp_template_arrival if fallback_params else None
+                    text_res = whatsapp.send_text(
+                        phone,
+                        result["reply"],
+                        fallback_template=fallback_tpl,
+                        fallback_params=fallback_params,
+                    )
+                    _log_reply_notification(
+                        result.get("tenant_id"),
+                        result.get("package_id"),
+                        "respuesta_ia",
+                        text_res,
+                        result["reply"],
+                    )
+                    for item in result["outbox"]:
+                        if item["type"] == "image":
+                            img_res = whatsapp.send_image(
+                                phone,
+                                item["url"],
+                                item.get("caption", ""),
+                                fallback_template=fallback_tpl,
+                                fallback_params=fallback_params,
+                            )
+                            _log_reply_notification(
+                                result.get("tenant_id"),
+                                result.get("package_id"),
+                                "qr_retiro",
+                                img_res,
+                                item.get("caption", "QR de retiro"),
+                            )
+                except Exception as exc:
+                    log.exception("Error procesando mensaje entrante de WhatsApp: %s", str(exc)[:300])
 
 
 def reserve_text_messages(payload: dict) -> dict:

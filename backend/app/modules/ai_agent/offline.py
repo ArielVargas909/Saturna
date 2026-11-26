@@ -11,6 +11,17 @@ def _lines(items: list[dict]) -> str:
     return "\n".join(f"• {i['codigo']}: {i['estado']} (hasta {i['plazo_hasta']})" for i in items)
 
 
+def _fee_suffix(r: dict) -> str:
+    if "cobro_estimado_bs" not in r:
+        return ""
+    if r.get("dias_de_retraso", 0) > 0:
+        return (
+            f" Cobro estimado: Bs {r['cobro_estimado_bs']:.2f} "
+            f"(incluye recargo por {r['dias_de_retraso']} día(s) de demora)."
+        )
+    return f" Cobro estimado: Bs {r['cobro_estimado_bs']:.2f}."
+
+
 def respond(ctx: tools.Ctx, text: str) -> tuple[str, list[str]]:
     t = text.lower()
     m = CODE.search(text)
@@ -26,20 +37,43 @@ def respond(ctx: tools.Ctx, text: str) -> tuple[str, list[str]]:
         r = call("resumen_cobros", periodo=periodo)
         if "error" in r:
             return r["error"], used
-        return (f"Cobros de {r['periodo']}: Bs {r['total_cobrado_bs']:.2f} "
-                f"(efectivo Bs {r['efectivo_bs']:.2f}, QR Bs {r['qr_bs']:.2f}) en {r['cantidad_de_cobros']} cobros. "
-                "Son cobros registrados, no utilidad."), used
+        return (
+            f"Cobros de {r['periodo']}: Bs {r['total_cobrado_bs']:.2f} "
+            f"(efectivo Bs {r['efectivo_bs']:.2f}, QR Bs {r['qr_bs']:.2f}) en {r['cantidad_de_cobros']} cobros. "
+            "Son cobros registrados, no utilidad."
+        ), used
+
     if ctx.role == "owner" and re.search(r"estanc|vencer|venc|atrasad", t):
         r = call("paquetes_estancados")
         if "error" in r:
             return r["error"], used
-        return ("Paquetes por vencer o estancados:\n" + _lines(r["paquetes"])) if r["paquetes"] else \
-            "No hay paquetes por vencer. ¡Todo al día!", used
-    if re.search(r"horario|atienden|abren|abre|direcci", t):
+        return (
+            ("Paquetes por vencer o estancados:\n" + _lines(r["paquetes"]))
+            if r["paquetes"]
+            else "No hay paquetes por vencer. ¡Todo al día!"
+        ), used
+
+    if re.search(r"horario|atienden|abren|abre|direcci|condici|requisit|tarifa|cu[aá]nto cuesta|recargo|c[oó]mo retir", t):
+        if code and re.search(r"recargo|tarifa|cuesta|pagar|costo", t):
+            r = call("consultar_estado_paquete", codigo=code)
+            if "error" in r:
+                return r["error"], used
+            return (
+                f"Tu paquete {r['codigo']} en {r['paqueteria']}: {r['estado']}. "
+                f"Plazo hasta {r['plazo_custodia_hasta']}.{_fee_suffix(r)}"
+            ), used
         r = call("horario_de_atencion", codigo=code)
         if not r["paqueterias"]:
             return "No encuentro paquetes asociados a tu número.", used
-        return "\n".join(f"{p['nombre']}: {p['horario']} — {p['direccion']}" for p in r["paqueterias"]), used
+        lines = []
+        for p in r["paqueterias"]:
+            lines.append(
+                f"{p['nombre']}: {p['horario']} — {p['direccion']}. "
+                f"Custodia: {p['dias_custodia']} día(s), tarifa Bs {p['tarifa_custodia_bs']:.2f} "
+                f"(recargo Bs {p['recargo_diario_bs']:.2f}/día). {p['condiciones_retiro']}"
+            )
+        return "\n".join(lines), used
+
     if re.search(r"\bqr\b|retir|recoger|recojo", t):
         if not code:
             r = call("listar_mis_paquetes")
@@ -50,14 +84,20 @@ def respond(ctx: tools.Ctx, text: str) -> tuple[str, list[str]]:
         r = call("solicitar_qr_retiro", codigo=code)
         if "error" in r:
             return r["error"], used
-        return f"Listo, te envié tu QR de retiro. Vence el {r['vence']} y sirve una sola vez.", used
+        return (
+            f"Listo, te envié tu QR de retiro para {r['codigo']}. "
+            f"Vence el {r['vence']} y sirve una sola vez.{_fee_suffix(r)}"
+        ), used
+
     if code:
         r = call("consultar_estado_paquete", codigo=code)
         if "error" in r:
             return r["error"], used
-        extra = f" Cobro estimado: Bs {r['cobro_estimado_bs']:.2f}." if "cobro_estimado_bs" in r else ""
-        return (f"Tu paquete {r['codigo']} en {r['paqueteria']}: {r['estado']}. "
-                f"Llegó el {r['llego']}; plazo hasta {r['plazo_custodia_hasta']}.{extra}"), used
+        return (
+            f"Tu paquete {r['codigo']} en {r['paqueteria']}: {r['estado']}. "
+            f"Llegó el {r['llego']}; plazo hasta {r['plazo_custodia_hasta']}.{_fee_suffix(r)}"
+        ), used
+
     r = call("listar_mis_paquetes")
     if not r["paquetes"]:
         return "No encuentro paquetes pendientes asociados a tu número.", used

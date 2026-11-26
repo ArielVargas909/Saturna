@@ -1,7 +1,8 @@
-from fastapi import APIRouter, Response
+from fastapi import APIRouter, BackgroundTasks, Response
 
 from app.core.deps import DB, CurrentTenant, CurrentUser
 from app.core.ratelimit import check_rate
+from app.modules.notifications.service import send_pickup_ready_task
 from app.modules.packages import service as pkgs
 from app.modules.qr import service
 from app.schemas import ConfirmIn, PackageOut, QRIssued, TokenIn, ValidateOut
@@ -10,9 +11,10 @@ router = APIRouter(tags=["qr"])
 
 
 @router.post("/packages/{package_id}/qr", response_model=QRIssued)
-def issue_qr(package_id: int, db: DB, tenant: CurrentTenant, user: CurrentUser):
+def issue_qr(package_id: int, bg: BackgroundTasks, db: DB, tenant: CurrentTenant, user: CurrentUser):
     pkg = pkgs.get_owned(db, tenant.id, package_id)
     token, expires = service.issue_token(db, tenant, pkg, user.id)
+    bg.add_task(send_pickup_ready_task, pkg.id, user.id, token, expires)
     return QRIssued(token=token, expires_at=expires, image=service.qr_data_uri(token))
 
 
