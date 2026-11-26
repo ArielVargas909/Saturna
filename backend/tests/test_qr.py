@@ -196,3 +196,15 @@ def test_manual_delivery_tenant_isolation(client, owner):
         json={"via": "manual", "metodo_pago": "cash", "confirmo_pago": True, "identidad_verificada": True},
     )
     assert r.status_code == 404
+
+
+def test_qr_png_is_8bit_rgb_for_whatsapp_cloud_api():
+    import struct
+
+    png = qr.qr_png_bytes("SATURNA-TEST-TOKEN-1234567890")
+    assert png.startswith(b"\x89PNG\r\n\x1a\n")
+    assert png[12:16] == b"IHDR"
+    width, height, bit_depth, color_type = struct.unpack(">IIBB", png[16:26])
+    assert width == height and width >= 200
+    assert bit_depth == 8
+    assert color_type == 2  # Truecolor RGB requerido por Meta WhatsApp Cloud API

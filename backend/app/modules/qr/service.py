@@ -1,7 +1,8 @@
 import base64
 import hashlib
-import io
 import secrets
+import struct
+import zlib
 from datetime import timedelta
 from decimal import Decimal
 
@@ -20,10 +21,41 @@ def hash_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
-def qr_png_bytes(token: str) -> bytes:
-    buf = io.BytesIO()
-    segno.make(token, error="m").save(buf, kind="png", scale=8, border=2)
-    return buf.getvalue()
+def _png_chunk(chunk_type: bytes, data: bytes) -> bytes:
+    crc = zlib.crc32(chunk_type + data) & 0xFFFFFFFF
+    return struct.pack(">I", len(data)) + chunk_type + data + struct.pack(">I", crc)
+
+
+def qr_png_bytes(token: str, scale: int = 8, border: int = 4) -> bytes:
+    """Genera un PNG RGB de 8 bits/canal (Meta WhatsApp rechaza PNGs de 1 bit con error 131053)."""
+    matrix = segno.make(token, error="m").matrix
+    size = len(matrix)
+    total = (size + border * 2) * scale
+    white_px = b"\xff\xff\xff"
+    black_px = b"\x00\x00\x00"
+    white_row = b"\x00" + white_px * total
+
+    raw = bytearray()
+    for _ in range(border * scale):
+        raw.extend(white_row)
+    for row in matrix:
+        line = bytearray(b"\x00")
+        line.extend(white_px * (border * scale))
+        for cell in row:
+            line.extend((black_px if cell else white_px) * scale)
+        line.extend(white_px * (border * scale))
+        for _ in range(scale):
+            raw.extend(line)
+    for _ in range(border * scale):
+        raw.extend(white_row)
+
+    ihdr = struct.pack(">IIBBBBB", total, total, 8, 2, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", ihdr)
+        + _png_chunk(b"IDAT", zlib.compress(bytes(raw), level=6))
+        + _png_chunk(b"IEND", b"")
+    )
 
 
 def qr_data_uri(token: str) -> str:
