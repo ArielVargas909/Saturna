@@ -215,6 +215,45 @@ def send_location(
     return _fallback_to_template(to, res, fallback_template, fallback_params)
 
 
+def send_image_media(
+    to: str,
+    media_id: str,
+    caption: str = "",
+    *,
+    fallback_template: str | None = None,
+    fallback_params: list[str] | None = None,
+    fallback_media_id: str | None = None,
+) -> SendResult:
+    """Envía una imagen ya subida a Meta por media_id (con fallback a plantilla si expiró 24 h)."""
+    if is_mock():
+        return _record({"type": "image_media", "to": to, "media_id": media_id, "caption": caption})
+    image_payload: dict[str, str] = {"id": media_id}
+    if caption:
+        image_payload["caption"] = caption
+    res = _post(
+        {
+            "messaging_product": "whatsapp",
+            "to": to,
+            "type": "image",
+            "image": image_payload,
+        }
+    )
+    if not res.ok and res.outside_window and fallback_template:
+        if fallback_template.endswith("_qr") and (fallback_media_id or media_id):
+            fb = send_template_image(to, fallback_template, fallback_params or [], fallback_media_id or media_id)
+            fb.fallback_used = True
+            fb.outside_window = True
+            fb.error_code = res.error_code
+            fb.detail = (
+                f"Fuera de ventana 24h; enviado con plantilla '{fallback_template}'"
+                if fb.ok
+                else f"Fuera de ventana 24h; fallback con plantilla falló: {fb.detail}"
+            )
+            return fb
+        return _fallback_to_template(to, res, fallback_template, fallback_params)
+    return res
+
+
 def send_template(to: str, template: str, params: list[str]) -> SendResult:
     """Envía una plantilla de WhatsApp con variables de texto en el cuerpo."""
     if is_mock():

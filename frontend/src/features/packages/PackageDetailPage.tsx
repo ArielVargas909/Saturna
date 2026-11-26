@@ -4,8 +4,7 @@ import { Link, useParams } from "react-router-dom";
 import { ErrorNote, Loading, Modal, StateBadge } from "../../components/ui";
 import { api } from "../../lib/api";
 import { bs, dt } from "../../lib/format";
-import type { PkgDetail, QRIssued } from "../../lib/types";
-import type { DeliveryPreview } from "../../lib/types";
+import type { DeliveryPreview, PkgDetail, QRIssued, QRSentOut } from "../../lib/types";
 import DeliveryModal from "../../components/DeliveryModal";
 
 export default function PackageDetailPage() {
@@ -41,6 +40,10 @@ export default function PackageDetailPage() {
       setQr(d);
       void refresh();
     },
+  });
+  const sendQr = useMutation({
+    mutationFn: () => api.post<QRSentOut>(`/packages/${id}/send-qr`),
+    onSuccess: () => void refresh(),
   });
   const notify = useMutation({
     mutationFn: () => api.post<{ status: string; detail: string }>(`/packages/${id}/notify`),
@@ -114,7 +117,19 @@ export default function PackageDetailPage() {
             </span>
           </div>
         )}
-        <ErrorNote error={issue.error ?? notify.error ?? giveBack.error} />
+        <ErrorNote error={sendQr.error ?? issue.error ?? notify.error ?? giveBack.error} />
+        {sendQr.data && (
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-cyan-200 bg-cyan-50 px-3 py-2 text-sm text-brand-900">
+            <span>
+              {sendQr.data.status === "sent"
+                ? "QR de un solo uso enviado al WhatsApp del cliente ✔"
+                : "QR generado (WhatsApp en modo simulado) ✔"}
+            </span>
+            <Link to="/scanner" className="font-semibold text-cyan-700 underline">
+              Ir a Escanear QR →
+            </Link>
+          </div>
+        )}
         {notify.data && (
           <p className="text-sm text-slate-600">
             {notify.data.status === "sent" && "Aviso enviado ✔"}
@@ -124,15 +139,22 @@ export default function PackageDetailPage() {
         )}
         {open && (
           <div className="flex flex-wrap gap-2">
-            <button className="btn-accent" onClick={() => setDeliveryOpen(true)}>
+            <button
+              className="btn-accent"
+              onClick={() => sendQr.mutate()}
+              disabled={sendQr.isPending}
+            >
+              {sendQr.isPending ? "Enviando QR…" : "Enviar QR al cliente"}
+            </button>
+            <button className="btn-primary" onClick={() => setDeliveryOpen(true)}>
               Entregar
             </button>
             <button
-              className="btn-accent"
+              className="btn-ghost"
               onClick={() => issue.mutate()}
               disabled={issue.isPending}
             >
-              Emitir QR de retiro
+              Ver QR en pantalla
             </button>
             <button
               className="btn-ghost"

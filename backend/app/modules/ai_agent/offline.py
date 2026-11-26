@@ -103,7 +103,8 @@ def respond(ctx: tools.Ctx, text: str, history: list[dict] | None = None) -> tup
             return r["error"], used
         return (
             f"¡Listo! Anotamos tu retiro para {r['codigo']}: {r['horario_acordado']} en {r['paqueteria']} "
-            f"(atención: {r['horario_atencion']}). Cuando vayas, escríbeme “QR {r['codigo']}”."
+            f"(atención: {r['horario_atencion']}). Ya te envié tu QR de retiro de un solo uso "
+            f"(vence el {r['qr_vence']}).{_fee_suffix(r)}"
         ), used
 
     if re.search(r"horario|atienden|abren|abre|direcci|condici|requisit|tarifa|cu[aá]nto cuesta|recargo|c[oó]mo retir", t):

@@ -136,7 +136,7 @@ def solicitar_qr_retiro(ctx: Ctx, codigo: str = "") -> dict:
         return {"error": "Ese paquete ya fue entregado o devuelto."}
     fees = pkgs.compute_fees(tenant, pkg)
     url = f"{get_settings().public_base_url.rstrip('/')}/qr/image/{token}.png"
-    ctx.outbox.append({"type": "image", "url": url, "caption": f"QR de retiro {pkg.code}"})
+    ctx.outbox.append({"type": "image", "url": url, "token": token, "caption": f"QR de retiro {pkg.code}"})
     return {
         "ok": True,
         "codigo": pkg.code,
@@ -148,7 +148,7 @@ def solicitar_qr_retiro(ctx: Ctx, codigo: str = "") -> dict:
 
 
 def agendar_retiro(ctx: Ctx, codigo: str = "", horario: str = "") -> dict:
-    """Acuerda y guarda el horario estimado de retiro de un paquete abierto del comprador."""
+    """Acuerda el horario de retiro de un paquete abierto y envía automáticamente su QR de un solo uso."""
     if ctx.role != "buyer":
         return {"error": "Solo el comprador puede agendar el horario de retiro."}
     clean_schedule = " ".join((horario or "").split())[:120]
@@ -164,7 +164,17 @@ def agendar_retiro(ctx: Ctx, codigo: str = "", horario: str = "") -> dict:
     tenant = ctx.db.get(Tenant, pkg.tenant_id)
     pkg.scheduled_pickup_at = clean_schedule
     pkgs.add_event(ctx.db, pkg.id, "CITA_RETIRO", f"Horario de retiro acordado: {clean_schedule}", None)
-    ctx.db.commit()
+    token, expires = qr.issue_token(ctx.db, tenant, pkg, None)
+    fees = pkgs.compute_fees(tenant, pkg)
+    url = f"{get_settings().public_base_url.rstrip('/')}/qr/image/{token}.png"
+    ctx.outbox.append(
+        {
+            "type": "image",
+            "url": url,
+            "token": token,
+            "caption": f"QR de retiro {pkg.code} ({clean_schedule})",
+        }
+    )
     return {
         "ok": True,
         "codigo": pkg.code,
@@ -172,7 +182,11 @@ def agendar_retiro(ctx: Ctx, codigo: str = "", horario: str = "") -> dict:
         "paqueteria": tenant.name,
         "horario_atencion": tenant.opening_hours,
         "direccion": tenant.address,
-        "nota": "Horario registrado para el equipo de ventanilla. Cuando vayas, pide tu QR de retiro.",
+        "qr_enviado": True,
+        "qr_vence": _fmt(expires),
+        "cobro_estimado_bs": float(fees["total"]),
+        "dias_de_retraso": fees["days_late"],
+        "nota": "Horario registrado y QR de retiro de un solo uso enviado automáticamente como imagen.",
     }
 
 

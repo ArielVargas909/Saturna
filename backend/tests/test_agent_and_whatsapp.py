@@ -446,12 +446,16 @@ def test_pickup_scheduling_and_multiturn_memory(client, owner, monkeypatch):
     first = ask(client, owner, "71234567", f"¿cómo va mi paquete {p['code']}?")
     assert p["code"] in first["reply"]
 
-    # Turno 2 (sin repetir el código): la memoria multi-turno recuerda el paquete y agenda el retiro
+    # Turno 2 (sin repetir el código): agenda el retiro y envía automáticamente el QR de un solo uso
     second = ask(client, owner, "71234567", "paso mañana a las 16:00 a recogerlo")
     assert "agendar_retiro" in second["tools"]
     assert p["code"] in second["reply"]
+    assert any(o["type"] == "image" and o["url"].endswith(".png") and o.get("token") for o in second["outbox"])
+    qr_token = next(o["token"] for o in second["outbox"] if o["type"] == "image")
+    assert client.post("/qr/validate", headers=owner, json={"token": qr_token}).status_code == 200
 
     detail = client.get(f"/packages/{p['id']}", headers=owner).json()
+    assert detail["state"] == "LISTO_PARA_RETIRO"
     assert "16:00" in detail["scheduled_pickup_at"]
     assert any(e["type"] == "CITA_RETIRO" for e in detail["events"])
 
@@ -632,3 +636,37 @@ def test_webhook_status_failed_updates_notification_and_audit(client, owner, db,
     updated = next(n for n in notes if n["id"] == note.id)
     assert updated["status"] == "failed"
     assert "131042" in updated["detail"]
+
+
+def test_operator_send_qr_to_client_and_scan_to_deliver(client, owner, monkeypatch):
+    p = new_package(client, owner, phone="71234567")
+    s = get_settings()
+    monkeypatch.setattr(s, "whatsapp_token", "token-test")
+    monkeypatch.setattr(s, "whatsapp_phone_id", "phone-test")
+    monkeypatch.setattr(s, "whatsapp_template_arrival", "aviso_llegada_qr")
+
+    calls = []
+
+    def fake_post(url, **kwargs):
+        calls.append((url, kwargs.get("json")))
+        if url.endswith("/media"):
+            return FakeWhatsAppResponse(200, '{"id":"media-qr-1"}')
+        if len(calls) == 2:
+            # Simula fuera de ventana 24h -> cae a plantilla aviso_llegada_qr con la misma imagen QR
+            return FakeWhatsAppResponse(400, '{"error":{"code":131047,"message":"Re-engagement"}}')
+        return FakeWhatsAppResponse(200, '{"messages":[{"id":"wamid-qr-sent"}]}')
+
+    monkeypatch.setattr("app.modules.notifications.whatsapp.httpx.post", fake_post)
+    sent = client.post(f"/packages/{p['id']}/send-qr", headers=owner)
+    assert sent.status_code == 200, sent.text
+    data = sent.json()
+    assert data["status"] == "sent"
+    assert calls[2][1]["type"] == "template"
+    assert calls[2][1]["template"]["name"] == "aviso_llegada_qr"
+
+    # El encargado escanea el QR enviado y el paquete queda ENTREGADO (y el QR no se puede reusar)
+    val = client.post("/qr/validate", headers=owner, json={"token": data["token"]})
+    assert val.status_code == 200
+    delivered = client.post("/qr/confirm", headers=owner, json={"token": data["token"], "payment_method": "cash"})
+    assert delivered.status_code == 200 and delivered.json()["state"] == "ENTREGADO"
+    assert client.post("/qr/confirm", headers=owner, json={"token": data["token"], "payment_method": "cash"}).status_code == 409

@@ -137,13 +137,28 @@ def process_incoming(payload: dict) -> None:
                     )
                     for item in result["outbox"]:
                         if item["type"] == "image":
-                            img_res = whatsapp.send_image(
-                                phone,
-                                item["url"],
-                                item.get("caption", ""),
-                                fallback_template=fallback_tpl,
-                                fallback_params=fallback_params,
-                            )
+                            img_res = None
+                            if not whatsapp.is_mock() and item.get("token"):
+                                from app.modules.qr import service as qr_service
+
+                                media = whatsapp.upload_media(qr_service.qr_png_bytes(str(item["token"])))
+                                if media.ok:
+                                    img_res = whatsapp.send_image_media(
+                                        phone,
+                                        media.message_id,
+                                        item.get("caption", ""),
+                                        fallback_template=fallback_tpl,
+                                        fallback_params=fallback_params,
+                                        fallback_media_id=media.message_id,
+                                    )
+                            if img_res is None:
+                                img_res = whatsapp.send_image(
+                                    phone,
+                                    item["url"],
+                                    item.get("caption", ""),
+                                    fallback_template=fallback_tpl,
+                                    fallback_params=fallback_params,
+                                )
                             _log_reply_notification(
                                 result.get("tenant_id"),
                                 result.get("package_id"),

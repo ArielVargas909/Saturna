@@ -97,6 +97,10 @@ export interface QRIssued {
   expires_at: string;
   image: string;
 }
+export interface QRSentOut extends QRIssued {
+  status: "sent" | "simulated";
+  detail: string;
+}
 export interface ValidateOut {
   package: Pkg;
   fees: Fees;

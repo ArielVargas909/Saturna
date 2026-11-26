@@ -169,6 +169,11 @@ class QRIssued(BaseModel):
     image: str  # data URI PNG
 
 
+class QRSentOut(QRIssued):
+    status: str  # sent | simulated
+    detail: str = ""
+
+
 class TokenIn(BaseModel):
     token: str = Field(min_length=20, max_length=200)
 

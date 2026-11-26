@@ -257,6 +257,81 @@ def send_pickup_ready(
     return note
 
 
+def send_qr_to_buyer(
+    db: Session,
+    pkg: Package,
+    tenant: Tenant,
+    user_id: int | None,
+    token: str,
+    expires_at: datetime,
+) -> Notification:
+    """Envía directamente al comprador por WhatsApp el QR de retiro recién emitido por el encargado."""
+    note = Notification(tenant_id=tenant.id, package_id=pkg.id, kind="qr_retiro", status="queued")
+    db.add(note)
+    s = get_settings()
+    exp_str = to_local(expires_at).strftime("%d/%m/%Y %H:%M")
+    fees = pkgs.compute_fees(tenant, pkg)
+    caption = (
+        f"QR de retiro para tu paquete {pkg.code} en {tenant.name}. "
+        f"Cobro estimado: Bs {fees['total']:.2f}. Vence el {exp_str} (uso único)."
+    )
+
+    if whatsapp.is_mock():
+        qr_url = f"{s.public_base_url.rstrip('/')}/qr/image/{token}.png"
+        whatsapp.send_image(pkg.buyer_phone, qr_url, caption)
+        note.status = "simulated"
+        note.meta_message_id = None
+        note.detail = f"Sin credenciales de WhatsApp; QR simulado. {caption}"[:240]
+        pkgs.add_event(db, pkg.id, "QR_SIMULADO", note.detail, user_id)
+        db.commit()
+        return note
+
+    if tenants.limit_reached(db, tenant, "notifications"):
+        note.status, note.detail = "failed", "limite_plan"
+        pkgs.add_event(db, pkg.id, "AVISO_FALLIDO", "Límite mensual de avisos del plan alcanzado", user_id)
+        db.commit()
+        return note
+
+    template = s.whatsapp_template_arrival
+    buyer = title_name(pkg.buyer_name) or "Cliente"
+    if template.endswith("_qr"):
+        sender = _first_attr(pkg, SENDER_FIELDS, "una tienda")
+        address = _first_attr(tenant, ADDRESS_FIELDS)
+        place = f"{tenant.name}, {address}" if address else tenant.name
+        fallback_params = [buyer, sender, place]
+    else:
+        fallback_params = [buyer, pkg.code, tenant.name]
+
+    try:
+        png = _qr_png(db, pkg, tenant, user_id, existing_token=token)
+        media = whatsapp.upload_media(png)
+        if not media.ok:
+            raise RuntimeError(f"No se pudo subir el QR a Meta: {media.detail}")
+        # Intenta enviar primero como imagen libre (gratis en ventana 24h); si expiró 24h cae a plantilla aprobada.
+        res = whatsapp.send_image_media(
+            pkg.buyer_phone,
+            media.message_id,
+            caption,
+            fallback_template=template,
+            fallback_params=fallback_params,
+            fallback_media_id=media.message_id,
+        )
+    except Exception as exc:
+        res = whatsapp.SendResult(False, detail=str(exc)[:300])
+
+    real_sent = res.ok and bool(res.message_id) and not res.simulated and not res.message_id.startswith("mock-")
+    note.status = "sent" if real_sent else "failed"
+    note.meta_message_id = res.message_id if real_sent else None
+    note.detail = (res.detail or caption)[:240]
+    if real_sent:
+        tenants.increment(db, tenant.id, "notifications")
+        pkgs.add_event(db, pkg.id, "QR_ENVIADO", f"QR de retiro enviado al comprador por WhatsApp ({note.detail})"[:240], user_id)
+    else:
+        pkgs.add_event(db, pkg.id, "AVISO_FALLIDO", note.detail, user_id)
+    db.commit()
+    return note
+
+
 def send_arrival_task(package_id: int) -> None:
     """Tarea en segundo plano (BackgroundTasks). Para producción pesada: ARQ + Redis."""
     with SessionLocal() as db:
