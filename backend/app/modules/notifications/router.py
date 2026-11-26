@@ -214,16 +214,72 @@ def reserve_text_messages(payload: dict) -> dict:
     return filtered
 
 
+def process_statuses(payload: dict) -> None:
+    """Procesa callbacks de estado de entrega de Meta (delivered/read/failed) y actualiza la bitácora."""
+    updates: list[tuple[str, str, str]] = []
+    for entry in payload.get("entry", []):
+        for change in entry.get("changes", []):
+            value = change.get("value", {})
+            for st in value.get("statuses", []):
+                wamid = str(st.get("id") or "")
+                state = str(st.get("status") or "")
+                if not wamid or not state:
+                    continue
+                detail = f"Meta: {state}"
+                if state == "failed":
+                    errs = st.get("errors") or []
+                    if isinstance(errs, list) and errs and isinstance(errs[0], dict):
+                        e0 = errs[0]
+                        code = e0.get("code", "")
+                        title = e0.get("title") or e0.get("message") or "error de entrega"
+                        extra = ""
+                        err_data = e0.get("error_data")
+                        if isinstance(err_data, dict) and err_data.get("details"):
+                            extra = f" — {err_data['details']}"
+                        detail = f"Meta entrega fallida ({code}): {title}{extra}"
+                    else:
+                        detail = "Meta entrega fallida (sin detalle)"
+                    log.error("WhatsApp delivery failed wamid=%s detail=%s", wamid, detail[:240])
+                else:
+                    log.info("WhatsApp delivery status wamid=%s status=%s", wamid, state)
+                updates.append((wamid, state, detail[:240]))
+    if not updates:
+        return
+    with SessionLocal() as db:
+        for wamid, state, detail in updates:
+            note = db.scalar(select(Notification).where(Notification.meta_message_id == wamid))
+            if note is None:
+                continue
+            if state == "failed":
+                note.status = "failed"
+                note.detail = detail
+                if note.package_id:
+                    pkgs.add_event(db, note.package_id, "AVISO_FALLIDO", detail, None)
+            elif not note.detail:
+                note.detail = detail
+        db.commit()
+
+
 @router.post("/webhooks/whatsapp")
 async def incoming(request: Request, bg: BackgroundTasks):
     body = await request.body()
-    if not _valid_signature(body, request.headers.get("X-Hub-Signature-256")):
+    sig_header = request.headers.get("X-Hub-Signature-256")
+    if not _valid_signature(body, sig_header):
+        log.warning("Webhook WhatsApp rechazado: firma inválida (header_present=%s)", bool(sig_header))
         raise HTTPException(403, "Firma inválida")
     try:
         payload = json.loads(body)
     except ValueError:
         raise HTTPException(400, "JSON inválido") from None
+    has_statuses = any(
+        bool(change.get("value", {}).get("statuses"))
+        for entry in payload.get("entry", [])
+        for change in entry.get("changes", [])
+    )
+    if has_statuses:
+        bg.add_task(process_statuses, payload)
     unique_payload = reserve_text_messages(payload)
     if unique_payload["entry"]:
+        log.info("Webhook WhatsApp aceptado con mensajes nuevos para procesar")
         bg.add_task(process_incoming, unique_payload)
     return {"ok": True}

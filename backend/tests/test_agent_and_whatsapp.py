@@ -243,6 +243,7 @@ def test_send_text_and_image_real_payloads(monkeypatch):
     s = get_settings()
     monkeypatch.setattr(s, "whatsapp_token", "token-test")
     monkeypatch.setattr(s, "whatsapp_phone_id", "phone-test")
+    monkeypatch.setattr(s, "whatsapp_template_arrival", "aviso_llegada")
     sent_payloads = []
 
     def fake_post(url, json=None, headers=None, timeout=None):
@@ -269,6 +270,7 @@ def test_send_text_outside_24h_window_falls_back_to_template(monkeypatch):
     s = get_settings()
     monkeypatch.setattr(s, "whatsapp_token", "token-test")
     monkeypatch.setattr(s, "whatsapp_phone_id", "phone-test")
+    monkeypatch.setattr(s, "whatsapp_template_arrival", "aviso_llegada")
     calls = []
 
     def fake_post(url, json=None, headers=None, timeout=None):
@@ -334,6 +336,7 @@ def test_proactive_pickup_respects_plan_notification_limit(client, owner, db, mo
     s = get_settings()
     monkeypatch.setattr(s, "whatsapp_token", "token-test")
     monkeypatch.setattr(s, "whatsapp_phone_id", "phone-test")
+    monkeypatch.setattr(s, "whatsapp_template_arrival", "aviso_llegada")
     monkeypatch.setattr(
         "app.modules.notifications.whatsapp.httpx.post",
         lambda *args, **kwargs: FakeWhatsAppResponse(200, '{"messages":[{"id":"wamid-ok"}]}'),
@@ -577,3 +580,55 @@ def test_gemini_function_calling_online(client, owner, monkeypatch):
     assert calls[0][1] == {"key": "AQ.fake-gemini-key"}
     # Preserva thoughtSignature en el segundo turno de function calling
     assert calls[1][2]["contents"][-2]["parts"][0]["thoughtSignature"] == "sig-123"
+
+
+def test_webhook_status_failed_updates_notification_and_audit(client, owner, db, monkeypatch):
+    from app.models import Notification
+
+    p = new_package(client, owner, phone="71234567")
+    note = Notification(
+        tenant_id=1,
+        package_id=p["id"],
+        kind="aviso_llegada",
+        status="sent",
+        meta_message_id="wamid.async-fail-1",
+        detail="",
+    )
+    db.add(note)
+    db.commit()
+
+    s = get_settings()
+    monkeypatch.setattr(s, "whatsapp_app_secret", "secreto")
+    payload = {
+        "entry": [
+            {
+                "changes": [
+                    {
+                        "value": {
+                            "statuses": [
+                                {
+                                    "id": "wamid.async-fail-1",
+                                    "status": "failed",
+                                    "errors": [
+                                        {
+                                            "code": 131042,
+                                            "title": "Business eligibility payment issue",
+                                            "error_data": {"details": "No payment method"},
+                                        }
+                                    ],
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        ]
+    }
+    body = json.dumps(payload).encode()
+    sig = "sha256=" + hmac.new(b"secreto", body, hashlib.sha256).hexdigest()
+    r = client.post("/webhooks/whatsapp", content=body, headers={"X-Hub-Signature-256": sig})
+    assert r.status_code == 200
+    notes = client.get("/notifications", headers=owner).json()
+    updated = next(n for n in notes if n["id"] == note.id)
+    assert updated["status"] == "failed"
+    assert "131042" in updated["detail"]
